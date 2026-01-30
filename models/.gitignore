@@ -1,0 +1,6 @@
+# Ignore all GGML model files
+*.bin
+*.gguf
+
+# Keep the README
+!README.md

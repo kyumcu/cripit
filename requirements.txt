@@ -1,0 +1,23 @@
+# Core dependencies
+PyQt6>=6.4.0
+pywhispercpp>=1.4.0
+numpy>=1.24.0
+requests>=2.28.0
+
+# Audio backends (at least one required)
+sounddevice>=0.4.6  # Alternative to PyAudio
+# PyAudio>=0.2.13   # Uncomment if you install portaudio system library
+
+# Voice Activity Detection (at least one recommended)
+webrtcvad-wheels>=2.0.0  # WebRTC VAD
+# torch>=2.0.0          # Uncomment for Silero VAD (more accurate)
+# torchaudio>=2.0.0
+
+# Optional utilities
+appdirs>=1.4.4
+pynput>=1.7.6  # For global hotkeys
+
+# Note: PyAudio requires system library:
+#   Ubuntu/Debian: sudo apt-get install portaudio19-dev
+#   macOS: brew install portaudio
+#   Then: pip install PyAudio

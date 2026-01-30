@@ -1,0 +1,257 @@
+# Real-Time Speech-to-Text Application
+## Project: CripIt - Voice to Text with Whisper.cpp
+
+---
+
+## 📋 Overview
+
+A PyQt6-based real-time speech-to-text application using whisper.cpp via pywhispercpp bindings for maximum speed and offline capability.
+
+**Key Features:**
+- Real-time transcription as you speak
+- Whisper Large V3 Turbo (809M) as primary model
+- Modular architecture supporting multiple models
+- Voice Activity Detection (VAD) for efficient processing
+- Copy-to-clipboard functionality
+- Cross-platform support (Windows, macOS, Linux)
+
+---
+
+## 🏗️ Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    PyQt6 GUI                         │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  │
+│  │  Text Area  │  │   Controls  │  │   Status    │  │
+│  │  (Output)   │  │(Start/Stop) │  │   Panel     │  │
+│  └─────────────┘  └─────────────┘  └─────────────┘  │
+└────────────────────┬────────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────────┐
+│              Audio Capture Thread                    │
+│         (PyAudio + Voice Activity Det.)              │
+│              ↓ Audio Chunks (30s max)               │
+└────────────────────┬────────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────────┐
+│           whisper.cpp (pywhispercpp)                 │
+│     ┌──────────────────────────────────────┐        │
+│     │   Model: Whisper V3 Turbo (809M)    │        │
+│     │   Fallback: Large-V3, Small, etc.   │        │
+│     └──────────────────────────────────────┘        │
+│              ↓ Transcription Results                │
+└─────────────────────────────────────────────────────┘
+```
+
+---
+
+## 📁 Project Structure
+
+```
+cripit/
+├── main.py                 # Entry point
+├── requirements.txt        # Dependencies
+├── README.md              # This file
+├── config/
+│   ├── __init__.py
+│   └── settings.py        # App configuration
+├── core/
+│   ├── __init__.py
+│   ├── audio_capture.py   # PyAudio + VAD
+│   ├── transcriber.py     # whisper.cpp wrapper
+│   └── model_manager.py   # Model loading/switching
+├── gui/
+│   ├── __init__.py
+│   ├── main_window.py     # Main PyQt window
+│   ├── text_display.py    # Scrolling text area
+│   └── controls.py        # Buttons, settings
+├── models/                # GGML model files (gitignored)
+│   └── README.md         # Model download instructions
+└── utils/
+    ├── __init__.py
+    └── helpers.py         # Audio processing, etc.
+```
+
+---
+
+## 🔧 Core Components
+
+### 1. Audio Capture (`core/audio_capture.py`)
+- **PyAudio** for microphone input
+- **Silero VAD** (Voice Activity Detection) for speech detection
+- Ring buffer for continuous audio (30-second chunks)
+- Callback-driven for real-time processing
+- Configurable sample rate: 16kHz (Whisper requirement)
+
+### 2. Transcription Engine (`core/transcriber.py`)
+- Uses **pywhispercpp** for whisper.cpp bindings
+- Supported models:
+  - Whisper Large V3 Turbo (809M) - **PRIMARY**
+  - Whisper Large V3 (1.55B) - High quality
+  - Distil-Whisper (756M) - Speed
+  - Tiny/Base/Small (for testing)
+- Auto language detection
+- Thread-safe transcription
+- Real-time callback for partial results
+
+### 3. Model Manager (`core/model_manager.py`)
+- Download/manage GGML models
+- Auto-download missing models
+- Model switching without restart
+- Memory management (unload unused models)
+
+### 4. GUI (`gui/main_window.py`)
+**Main Window Components:**
+- Large text display (scrollable, copyable)
+- Start/Stop recording button
+- Model selector dropdown
+- Language selector (auto-detect or specific)
+- Status bar (recording/processing/idle)
+- Settings panel (audio device, VAD sensitivity)
+- System tray icon (optional)
+- Global hotkey support (Ctrl+Shift+R)
+
+---
+
+## ⚡ Real-Time Pipeline
+
+### Audio Flow
+1. Microphone → PyAudio
+2. VAD detection (silence vs speech)
+3. Audio chunks accumulate while speech detected
+4. When speech ends (VAD silence) → Send to transcriber
+
+### Transcription Flow
+1. Audio chunk → whisper.cpp
+2. Text result generated
+3. Results appended to text display
+4. Partial results shown while processing
+
+### Threading Model
+- **Main thread**: PyQt GUI
+- **Audio thread**: Continuous capture
+- **Worker thread**: Transcription (non-blocking)
+
+---
+
+## 📦 Dependencies
+
+```txt
+PyQt6>=6.4.0
+pywhispercpp>=1.2.0
+PyAudio>=0.2.13
+torch>=2.0.0        # For Silero VAD
+numpy>=1.24.0
+requests>=2.28.0    # For model downloading
+```
+
+---
+
+## 🎛️ Features
+
+### Core Features
+- ✅ Real-time speech-to-text
+- ✅ Whisper V3 Turbo (fast, accurate)
+- ✅ Multi-model support (switchable)
+- ✅ Auto language detection
+- ✅ Copy-to-clipboard
+- ✅ Audio device selection
+
+### Advanced Features
+- ✅ Voice Activity Detection (no silence transcription)
+- ✅ Adjustable VAD sensitivity
+- ✅ Partial result preview
+- ✅ Keyboard shortcuts
+- ✅ System tray mode
+
+---
+
+## 🚀 Implementation Plan
+
+### Phase 1: Setup & Dependencies
+- [ ] Create project structure
+- [ ] Install dependencies (PyQt6, pywhispercpp, PyAudio, torch for VAD)
+- [ ] Download Whisper V3 Turbo GGML model
+
+### Phase 2: Core Audio
+- [ ] Implement PyAudio capture
+- [ ] Add Silero VAD integration
+- [ ] Create audio buffer management
+
+### Phase 3: Transcription
+- [ ] Integrate pywhispercpp
+- [ ] Implement model loading/switching
+- [ ] Create transcription worker thread
+
+### Phase 4: GUI
+- [ ] Build main window layout
+- [ ] Add text display with copy functionality
+- [ ] Implement controls (start/stop, model select)
+- [ ] Add status indicators
+
+### Phase 5: Polish
+- [ ] Add configuration persistence
+- [ ] System tray integration
+- [ ] Global hotkeys
+- [ ] Error handling & logging
+
+---
+
+## 🎯 Supported Models
+
+| Model | Params | Speed | WER | Use Case |
+|-------|--------|-------|-----|----------|
+| **Whisper Large V3 Turbo** | 809M | ⭐⭐⭐⭐⭐ | 7.75% | **PRIMARY** - Best balance |
+| Whisper Large V3 | 1.55B | ⭐⭐⭐ | 7.4% | High quality, multilingual |
+| Distil-Whisper | 756M | ⭐⭐⭐⭐⭐ | ~7.5% | English-only, fastest |
+| Whisper Small | 466M | ⭐⭐⭐⭐ | ~10% | Testing, low resource |
+| Whisper Base | 142M | ⭐⭐⭐⭐⭐ | ~15% | Testing only |
+
+---
+
+## 📝 Notes
+
+### Model Files
+Models are stored in `models/` directory as GGML binary files (.bin). These are NOT included in git.
+
+**Download Models:**
+```bash
+# Using whisper.cpp's download script
+./download-ggml-model.sh large-v3-turbo
+
+# Or manually from:
+# https://huggingface.co/ggerganov/whisper.cpp
+```
+
+### Audio Requirements
+- Sample rate: 16kHz (Whisper requirement)
+- Format: 16-bit PCM
+- Channels: Mono
+
+### Platform-Specific Notes
+- **macOS**: May need to grant microphone permissions
+- **Linux**: Requires PortAudio development libraries
+- **Windows**: Works with default PyAudio wheels
+
+---
+
+## 🔮 Future Enhancements
+
+- [ ] Export transcription to file
+- [ ] Speaker diarization (who is speaking)
+- [ ] Integration with OpenCode (the original use case!)
+- [ ] Cloud sync for transcriptions
+- [ ] Mobile app companion
+
+---
+
+## 📄 License
+
+MIT License - Open source, free to use and modify.
+
+---
+
+**Created:** January 2026  
+**Purpose:** Real-time STT for development workflows  
+**Engine:** whisper.cpp + PyQt6
