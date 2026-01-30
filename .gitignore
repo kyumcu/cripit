@@ -47,3 +47,4 @@ app_config.json
 # Model files (large binaries)
 models/*.bin
 models/*.gguf
+output/

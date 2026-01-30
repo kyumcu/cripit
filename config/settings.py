@@ -94,11 +94,16 @@ class UISettings:
     minimize_to_tray: bool = True
     global_hotkey: str = "ctrl+shift+r"
     
+    # Output directory for transcriptions
+    output_dir: str = str(BASE_DIR / "output")
+    
     def __post_init__(self):
         logger.info(f"UISettings initialized: {self.window_width}x{self.window_height}")
+        # Ensure output directory exists
+        Path(self.output_dir).mkdir(parents=True, exist_ok=True)
     
     def __repr__(self):
-        return f"UISettings(title={self.window_title})"
+        return f"UISettings(title={self.window_title}, output={self.output_dir})"
 
 
 class AppConfig:
@@ -188,6 +193,7 @@ class AppConfig:
                     'auto_copy': self.ui.auto_copy,
                     'minimize_to_tray': self.ui.minimize_to_tray,
                     'global_hotkey': self.ui.global_hotkey,
+                    'output_dir': self.ui.output_dir,
                 }
             }
             
