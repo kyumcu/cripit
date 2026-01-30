@@ -151,7 +151,7 @@ class ModelManager:
             file="ggml-distil-large-v3.bin",
             size_mb=1300,
             params="756M",
-            url=f"{HF_REPO}/resolve/main/ggml-distil-large-v3.bin",
+            url="https://huggingface.co/distil-whisper/distil-large-v3-ggml/resolve/main/ggml-distil-large-v3.bin",
             description="Distilled large v3, English only, very fast"
         ),
     }
