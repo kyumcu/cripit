@@ -5,13 +5,14 @@
 
 ## 📋 Overview
 
-A PyQt6-based real-time speech-to-text application using whisper.cpp via pywhispercpp bindings for maximum speed and offline capability.
+A PyQt6-based real-time speech-to-text application using whisper.cpp via `pywhispercpp` bindings for maximum speed and offline capability.
 
 **Key Features:**
 - Real-time transcription as you speak
 - Whisper Large V3 Turbo (809M) as primary model
 - Modular architecture supporting multiple models
 - Voice Activity Detection (VAD) for efficient processing
+- No-drop recording pipeline (disk-backed FIFO spool)
 - Copy-to-clipboard functionality
 - Cross-platform support (Windows, macOS, Linux)
 
@@ -20,28 +21,39 @@ A PyQt6-based real-time speech-to-text application using whisper.cpp via pywhisp
 ## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                    PyQt6 GUI                         │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  │
-│  │  Text Area  │  │   Controls  │  │   Status    │  │
-│  │  (Output)   │  │(Start/Stop) │  │   Panel     │  │
-│  └─────────────┘  └─────────────┘  └─────────────┘  │
-└────────────────────┬────────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────────┐
-│              Audio Capture Thread                    │
-│         (PyAudio + Voice Activity Det.)              │
-│              ↓ Audio Chunks (30s max)               │
-└────────────────────┬────────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────────┐
-│           whisper.cpp (pywhispercpp)                 │
-│     ┌──────────────────────────────────────┐        │
-│     │   Model: Whisper V3 Turbo (809M)    │        │
-│     │   Fallback: Large-V3, Small, etc.   │        │
-│     └──────────────────────────────────────┘        │
-│              ↓ Transcription Results                │
-└─────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│                         PyQt6 GUI                           │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
+│  │  Text Area  │  │   Controls  │  │ Status (VAD/Queue)  │ │
+│  │  (Output)   │  │(Start/Stop) │  │ + Settings dialog   │ │
+│  └─────────────┘  └─────────────┘  └─────────────────────┘ │
+└───────────────────────────┬───────────────────────────────┘
+                            │
+┌───────────────────────────▼───────────────────────────────┐
+│                    Audio Capture Thread                    │
+│             (sounddevice/PyAudio + WebRTC VAD)             │
+│  - Finalizes speech segments (silence timeout)             │
+│  - Hard-splits long speech (max segment duration)          │
+└───────────────────────────┬───────────────────────────────┘
+                            │
+┌───────────────────────────▼───────────────────────────────┐
+│               Disk-Backed Recording Spool (FIFO)           │
+│              output/spool/{queued,processing,failed}       │
+│  - Each segment becomes a timestamped sequential WAV job   │
+│  - If disk is low: stop recording (never silently drop)    │
+└───────────────────────────┬───────────────────────────────┘
+                            │
+┌───────────────────────────▼───────────────────────────────┐
+│               Sequential Transcription Pipeline            │
+│                 (single worker thread, FIFO)               │
+│  - Deletes job WAV on success                               │
+│  - Moves to failed/ on error and continues                  │
+└───────────────────────────┬───────────────────────────────┘
+                            │
+┌───────────────────────────▼───────────────────────────────┐
+│                 whisper.cpp (pywhispercpp)                 │
+│    - CPU by default; CUDA supported when built with CUDA   │
+└───────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -58,9 +70,11 @@ cripit/
 │   └── settings.py        # App configuration
 ├── core/
 │   ├── __init__.py
-│   ├── audio_capture.py   # PyAudio + VAD
-│   ├── transcriber.py     # whisper.cpp wrapper
-│   └── model_manager.py   # Model loading/switching
+│   ├── audio_capture.py           # Audio capture + VAD, emits finalized recordings
+│   ├── recording_spool.py         # Disk-backed FIFO spool (timestamped WAV jobs)
+│   ├── transcription_pipeline.py  # Sequential transcription worker (FIFO)
+│   ├── transcriber.py             # whisper.cpp wrapper
+│   └── model_manager.py           # Model loading/switching
 ├── gui/
 │   ├── __init__.py
 │   ├── main_window.py     # Main PyQt window
@@ -120,18 +134,20 @@ cripit/
 1. Microphone → PyAudio
 2. VAD detection (silence vs speech)
 3. Audio chunks accumulate while speech detected
-4. When speech ends (VAD silence) → Send to transcriber
+4. When speech ends (VAD silence) → Finalize a recording segment
+5. Segment is spooled to disk as a sequential job (WAV + metadata)
 
 ### Transcription Flow
-1. Audio chunk → whisper.cpp
-2. Text result generated
-3. Results appended to text display
-4. Partial results shown while processing
+1. Pipeline reads the next spooled job (FIFO)
+2. Job WAV → whisper.cpp
+3. Text result generated
+4. Results appended to text display
+5. Job WAV is deleted on success (or moved to `output/spool/failed/` on error)
 
 ### Threading Model
 - **Main thread**: PyQt GUI
 - **Audio thread**: Continuous capture
-- **Worker thread**: Transcription (non-blocking)
+- **Pipeline thread**: Sequential transcription worker (FIFO)
 
 ---
 
@@ -167,36 +183,25 @@ requests>=2.28.0    # For model downloading
 
 ---
 
-## 🚀 Implementation Plan
+## 🧠 No-Drop Recording Spool
 
-### Phase 1: Setup & Dependencies
-- [ ] Create project structure
-- [ ] Install dependencies (PyQt6, pywhispercpp, PyAudio, torch for VAD)
-- [ ] Download Whisper V3 Turbo GGML model
+CripIt uses a disk-backed FIFO spool to ensure finalized recordings are not dropped when transcription falls behind.
 
-### Phase 2: Core Audio
-- [ ] Implement PyAudio capture
-- [ ] Add Silero VAD integration
-- [ ] Create audio buffer management
+- Spool root: `output/spool`
+- States:
+  - `output/spool/queued/` (backlog)
+  - `output/spool/processing/` (in-flight)
+  - `output/spool/failed/` (kept on error)
 
-### Phase 3: Transcription
-- [ ] Integrate pywhispercpp
-- [ ] Implement model loading/switching
-- [ ] Create transcription worker thread
+Operational rules:
+- Jobs are processed strictly in order.
+- On success: job WAV+JSON is deleted (no long-term archive).
+- On failure: job is moved to `failed/` and the pipeline continues.
+- On low disk: CripIt stops recording and shows an error (never silently drops).
 
-### Phase 4: GUI
-- [ ] Build main window layout
-- [ ] Add text display with copy functionality
-- [ ] Implement controls (start/stop, model select)
-- [ ] Add status indicators
-
-### Phase 5: Polish
-- [ ] Add configuration persistence
-- [ ] System tray integration
-- [ ] Global hotkeys
-- [ ] Error handling & logging
-
----
+If you are changing settings while the app is running:
+- Most settings apply immediately.
+- Microphone device changes generally require stopping and starting recording.
 
 ## 🎯 Supported Models
 

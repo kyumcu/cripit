@@ -46,6 +46,20 @@
 └───────────────────────────┬─────────────────────────────────┘
                             │
 ┌───────────────────────────▼─────────────────────────────────┐
+│         Disk-Backed Recording Spool (FIFO, no-drop)          │
+│          output/spool/{queued,processing,failed}             │
+│  - Each finalized segment becomes a timestamped WAV job      │
+│  - Low disk => stop recording (never silently drop)          │
+└───────────────────────────┬─────────────────────────────────┘
+                            │
+┌───────────────────────────▼─────────────────────────────────┐
+│          Sequential Transcription Pipeline (FIFO)            │
+│  - Single worker thread                                     │
+│  - Deletes job on success                                   │
+│  - Moves to failed/ on error and continues                  │
+└───────────────────────────┬─────────────────────────────────┘
+                            │
+┌───────────────────────────▼─────────────────────────────────┐
 │            whisper.cpp (via pywhispercpp)                    │
 │     ┌────────────────────────────────────────┐              │
 │     │    Whisper Large V3 Turbo (809M)      │              │
@@ -69,6 +83,8 @@ cripit/
 ├── core/
 │   ├── __init__.py
 │   ├── audio_capture.py         # Audio + VAD implementation
+│   ├── recording_spool.py       # Disk-backed FIFO spool (timestamped WAV jobs)
+│   ├── transcription_pipeline.py# Sequential transcription worker (FIFO)
 │   ├── transcriber.py           # whisper.cpp wrapper
 │   └── model_manager.py         # Model download/management
 ├── gui/
@@ -85,7 +101,8 @@ cripit/
 ├── test_all.py                  # Comprehensive test runner
 ├── requirements.txt             # Python dependencies
 ├── .gitignore                   # Project exclusions
-└── README.md                    # Implementation plan
+├── TODO.md                      # Detailed tracking for architectural work
+└── README.md                    # Primary documentation
 ```
 
 ---
@@ -123,7 +140,8 @@ class AppConfig:
 - Multiple audio backends: PyAudio, sounddevice
 - Multiple VAD options: WebRTC VAD, Silero VAD (PyTorch)
 - State machine: IDLE → LISTENING → RECORDING → PROCESSING
-- Real-time audio buffering (30-second chunks)
+- Finalized recording segments (silence timeout)
+- Hard-split long speech into multiple segments (max duration)
 - Silence timeout detection (configurable)
 - Thread-safe audio queue
 
@@ -158,7 +176,7 @@ class SileroVAD(BaseVAD):
 - pywhispercpp integration
 - Support for 13 Whisper models
 - Auto language detection
-- Background transcription worker thread
+- Sequential transcription pipeline (single worker, FIFO)
 - Real-time statistics tracking
 - Multi-model support with hot-swapping
 
@@ -232,19 +250,14 @@ class ModelInfo:
 - Status bar with VAD indicator
 - Progress bar for downloads/transcription
 - Keyboard shortcuts (Ctrl+R, Ctrl+S)
-- Background worker thread for transcription
+- Disk-backed spool + sequential transcription pipeline
 
 **Key Classes:**
 ```python
 class MainWindow(QMainWindow):
     # Main application window
-    # Audio capture integration
-    # Model switching UI
-    # Transcription result display
-
-class TranscriptionWorker(QThread):
-    # Background worker for transcription
-    # Prevents UI blocking during inference
+    # Spools finalized recordings to disk
+    # Enqueues jobs to sequential transcription pipeline
 ```
 
 ---

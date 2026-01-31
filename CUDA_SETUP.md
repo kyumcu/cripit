@@ -40,6 +40,12 @@ python -c "from utils.cuda_utils import CUDAManager; CUDAManager().validate_cuda
 python main.py
 ```
 
+Tip: use the helper script to run with logging and avoid unnecessary rebuilds:
+
+```bash
+./run_with_cuda.sh
+```
+
 ## App Settings
 
 CripIt stores CUDA preferences in `app_config.json` under `model`:
