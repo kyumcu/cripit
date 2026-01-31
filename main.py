@@ -276,7 +276,8 @@ def main():
             channels=config.audio.channels,
             vad_type="webrtc",
             vad_aggressiveness=config.audio.vad_aggressiveness,
-            silence_timeout=config.audio.silence_timeout
+            silence_timeout=config.audio.silence_timeout,
+            max_recording_duration=getattr(config.audio, "max_recording_duration", 30.0),
         )
         logger.info("✓ Audio capture initialized")
         

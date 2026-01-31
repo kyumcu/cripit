@@ -138,6 +138,11 @@ class Transcriber:
         if self._model_loaded:
             logger.info("Model already loaded")
             return True
+
+        acquired = self._transcription_lock.acquire(timeout=10.0)
+        if not acquired:
+            logger.error("Timed out waiting to load model (transcription busy)")
+            return False
         
         model_file = model_path or self.model_path
         
@@ -152,109 +157,137 @@ class Transcriber:
             return False
         
         try:
-            logger.info(f"Loading model from: {model_file}")
-            logger.info(f"Model file size: {model_file.stat().st_size / (1024**3):.2f} GB")
+            # Decide once whether fallback is allowed.
+            fallback_allowed = False
+            try:
+                from config.settings import config
+                fallback_allowed = bool(getattr(config.model, "cuda_fallback_to_cpu", False))
+            except Exception:
+                fallback_allowed = False
 
-            # Check CUDA availability if requested
-            using_gpu = False
-            device_name = "CPU"
-            
-            if self.use_cuda:
+            while True:
                 try:
-                    from utils.cuda_utils import CUDAManager
-                    cuda_manager = CUDAManager()
-                    cuda_status = cuda_manager.detect_cuda()
+                    logger.info(f"Loading model from: {model_file}")
+                    logger.info(f"Model file size: {model_file.stat().st_size / (1024**3):.2f} GB")
 
-                    if cuda_status.available and getattr(cuda_status, "pywhispercpp_cuda", False):
-                        # pywhispercpp does not provide a reliable runtime switch to force CPU when built with CUDA.
-                        # If the model does not fit, attempting to load can abort the process.
-                        fits, msg = cuda_manager.check_model_fits_gpu(self.model_name, self.cuda_device)
+                    # Check CUDA availability if requested
+                    using_gpu = False
+                    device_name = "CPU"
 
-                        if not fits:
-                            logger.error(f"{msg}")
-                            logger.error("Model will not be loaded to avoid a CUDA/OOM abort. Choose a smaller model.")
-                            return False
+                    if self.use_cuda:
+                        try:
+                            from utils.cuda_utils import CUDAManager
+                            cuda_manager = CUDAManager()
+                            cuda_status = cuda_manager.detect_cuda()
 
-                        using_gpu = True
-                        device_name = f"GPU (device {self.cuda_device})"
-                        logger.info(f"✓ CUDA detected - {msg}")
-                    elif cuda_status.available and not getattr(cuda_status, "pywhispercpp_cuda", False):
-                        logger.info("CUDA detected but pywhispercpp is not CUDA-enabled - using CPU mode")
-                    else:
-                        logger.info("CUDA not available - using CPU mode")
-                except ImportError:
-                    logger.debug("CUDA utils not available - using CPU mode")
+                            if cuda_status.available and getattr(cuda_status, "pywhispercpp_cuda", False):
+                                # pywhispercpp does not provide a reliable runtime switch to force CPU when built with CUDA.
+                                # If the model does not fit, attempting to load can abort the process.
+                                fits, msg = cuda_manager.check_model_fits_gpu(self.model_name, self.cuda_device)
+
+                                if not fits:
+                                    logger.error(f"{msg}")
+                                    if fallback_allowed:
+                                        logger.warning("Falling back to CPU mode due to GPU memory constraints")
+                                        self.use_cuda = False
+                                        fallback_allowed = False
+                                        continue
+                                    logger.error(
+                                        "Model will not be loaded to avoid a CUDA/OOM abort. Choose a smaller model."
+                                    )
+                                    return False
+
+                                using_gpu = True
+                                device_name = f"GPU (device {self.cuda_device})"
+                                logger.info(f"✓ CUDA detected - {msg}")
+                            elif cuda_status.available and not getattr(cuda_status, "pywhispercpp_cuda", False):
+                                logger.info("CUDA detected but pywhispercpp is not CUDA-enabled - using CPU mode")
+                            else:
+                                logger.info("CUDA not available - using CPU mode")
+                        except ImportError:
+                            logger.debug("CUDA utils not available - using CPU mode")
+                        except Exception as e:
+                            logger.warning(f"CUDA check failed: {e} - using CPU mode")
+
+                    load_start = time.time()
+
+                    # Load model with parameters
+                    params = {
+                        'language': self.language,
+                        'n_threads': self.n_threads,
+                        'translate': self.translate,
+                        'print_progress': False,
+                        'print_realtime': False,
+                    }
+
+                    # NOTE: whisper.cpp GPU acceleration (CUDA) is enabled at build-time.
+                    # pywhispercpp does not expose llama.cpp-style GPU offload params like
+                    # `n_gpu_layers`; passing unknown params can raise exceptions (or worse).
+                    if using_gpu:
+                        logger.info("GPU mode enabled (CUDA build); no extra load params required")
+
+                    # Remove None values
+                    params = {k: v for k, v in params.items() if v is not None}
+
+                    logger.info(f"Loading model on {device_name}...")
+                    self._model = Model(str(model_file), **params)
+
+                    load_time = time.time() - load_start
+
+                    self._model_loaded = True
+                    self._using_gpu = using_gpu
+                    self._device_name = device_name
+                    logger.info(f"✓ Model loaded successfully on {device_name} in {load_time:.2f}s")
+
+                    if self.on_model_loaded:
+                        try:
+                            self.on_model_loaded()
+                        except Exception as e:
+                            logger.error(f"Model loaded callback error: {e}")
+
+                    return True
+
                 except Exception as e:
-                    logger.warning(f"CUDA check failed: {e} - using CPU mode")
+                    logger.error(f"Failed to load model: {e}")
 
-            load_start = time.time()
-
-            # Load model with parameters
-            params = {
-                'language': self.language,
-                'n_threads': self.n_threads,
-                'translate': self.translate,
-                'print_progress': False,
-                'print_realtime': False,
-            }
-            
-            # Add GPU parameters if using GPU
-            # NOTE: whisper.cpp GPU acceleration (CUDA) is enabled at build-time.
-            # pywhispercpp does not expose llama.cpp-style GPU offload params like
-            # `n_gpu_layers`; passing unknown params can raise exceptions (or worse).
-            if using_gpu:
-                logger.info("GPU mode enabled (CUDA build); no extra load params required")
-
-            # Remove None values
-            params = {k: v for k, v in params.items() if v is not None}
-
-            logger.info(f"Loading model on {device_name}...")
-            self._model = Model(str(model_file), **params)
-
-            load_time = time.time() - load_start
-
-            self._model_loaded = True
-            self._using_gpu = using_gpu
-            self._device_name = device_name
-            logger.info(f"✓ Model loaded successfully on {device_name} in {load_time:.2f}s")
-
-            if self.on_model_loaded:
-                try:
-                    self.on_model_loaded()
-                except Exception as e:
-                    logger.error(f"Model loaded callback error: {e}")
-
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to load model: {e}")
-            
-            # If CUDA failed, try fallback to CPU
-            if self.use_cuda:
-                try:
-                    from config.settings import config
-                    if config.model.cuda_fallback_to_cpu:
+                    if self.use_cuda and fallback_allowed:
                         logger.info("Attempting fallback to CPU mode...")
                         self.use_cuda = False
-                        return self.load_model(model_path)
-                except:
-                    pass
-            
-            if self.on_error:
-                try:
-                    self.on_error(e)
-                except:
-                    pass
-            return False
+                        fallback_allowed = False
+                        continue
+
+                    if self.on_error:
+                        try:
+                            self.on_error(e)
+                        except Exception:
+                            pass
+                    return False
+
+        finally:
+            try:
+                self._transcription_lock.release()
+            except Exception:
+                pass
     
     def unload_model(self):
         """Unload model to free memory."""
-        if self._model:
+        if not self._model:
+            return
+
+        # Prevent unload while a transcription is running.
+        acquired = self._transcription_lock.acquire(timeout=10.0)
+        if not acquired:
+            logger.warning("Timed out waiting to unload model (transcription busy)")
+            return
+
+        try:
             logger.info("Unloading model...")
             # pywhispercpp doesn't have explicit unload, just dereference
             self._model = None
             self._model_loaded = False
             logger.info("Model unloaded")
+        finally:
+            self._transcription_lock.release()
     
     def transcribe(self, audio_data: np.ndarray, 
                    is_partial: bool = False) -> Optional[TranscriptionResult]:
@@ -276,14 +309,10 @@ class Transcriber:
             logger.error("Cannot transcribe - pywhispercpp not available")
             return None
         
-        # Check if already transcribing (whisper.cpp is not thread-safe)
-        if self._is_transcribing:
-            logger.warning("Transcription already in progress, skipping this request")
-            return None
-        
-        # Acquire lock to prevent concurrent transcription
-        if not self._transcription_lock.acquire(blocking=False):
-            logger.warning("Could not acquire transcription lock, skipping")
+        # Acquire lock to prevent concurrent transcription.
+        # Do not drop work here; pipeline guarantees sequential calls.
+        if not self._transcription_lock.acquire(timeout=30.0):
+            logger.error("Timed out waiting for transcription lock")
             return None
         
         try:

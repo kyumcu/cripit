@@ -13,56 +13,25 @@ from PyQt6.QtWidgets import (
     QGroupBox, QProgressBar, QSystemTrayIcon, QMenu, QApplication,
     QMessageBox, QFileDialog
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QObject
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QSize, QObject
 from PyQt6.QtGui import QIcon, QKeySequence, QFont, QAction, QShortcut
 
 logger = logging.getLogger(__name__)
 
 
-class TranscriptionWorker(QThread):
-    """Background worker for transcription to avoid blocking GUI."""
-    
-    transcription_ready = pyqtSignal(str, float)  # text, duration
-    error_occurred = pyqtSignal(str)
-    
-    def __init__(self, transcriber):
-        super().__init__()
-        self.transcriber = transcriber
-        self.audio_data = None
-        self._is_running = True
-    
-    def set_audio(self, audio_data):
-        """Set audio data to transcribe."""
-        self.audio_data = audio_data
-    
-    def run(self):
-        """Run transcription in background thread."""
-        if self.audio_data is None:
-            return
-        
-        try:
-            result = self.transcriber.transcribe(self.audio_data)
-            
-            if result:
-                self.transcription_ready.emit(result.text, result.duration)
-            else:
-                self.error_occurred.emit("Transcription failed")
-                
-        except Exception as e:
-            logger.error(f"Transcription worker error: {e}")
-            self.error_occurred.emit(str(e))
-    
-    def stop(self):
-        """Stop the worker."""
-        self._is_running = False
-        self.wait(1000)
-
-
 class AudioSignals(QObject):
     """Signals for thread-safe audio callbacks."""
-    audio_ready = pyqtSignal(object)  # audio_data
+    recording_ready = pyqtSignal(object)  # FinalizedRecording
     vad_detected = pyqtSignal(bool)   # is_speech
     state_changed = pyqtSignal(object)  # RecordingState
+
+
+class PipelineSignals(QObject):
+    """Signals for thread-safe pipeline callbacks."""
+    backlog_changed = pyqtSignal(int, int)  # queued, processing
+    job_started = pyqtSignal(int)  # seq
+    job_done = pyqtSignal(int, str, float)  # seq, text, duration
+    job_failed = pyqtSignal(int, str, str)  # seq, error, failed_path
 
 
 class MainWindow(QMainWindow):
@@ -75,15 +44,22 @@ class MainWindow(QMainWindow):
         self.audio_capture = audio_capture
         self.transcriber = transcriber
         self.model_manager = model_manager
-        
-        self.worker = None
+
+        self.spool = None
+        self.pipeline = None
         self.is_recording = False
         
         # Create signals object for thread-safe callbacks
         self.audio_signals = AudioSignals()
-        self.audio_signals.audio_ready.connect(self._handle_audio_ready)
+        self.audio_signals.recording_ready.connect(self._handle_recording_ready)
         self.audio_signals.vad_detected.connect(self._handle_vad_detected)
         self.audio_signals.state_changed.connect(self._handle_state_changed)
+
+        self.pipeline_signals = PipelineSignals()
+        self.pipeline_signals.backlog_changed.connect(self._handle_backlog_changed)
+        self.pipeline_signals.job_started.connect(self._handle_job_started)
+        self.pipeline_signals.job_done.connect(self._handle_job_done)
+        self.pipeline_signals.job_failed.connect(self._handle_job_failed)
         
         # Timer for VAD updates
         self.vad_timer = QTimer(self)
@@ -91,6 +67,7 @@ class MainWindow(QMainWindow):
         self._current_vad_state = False
         
         logger.info("Initializing MainWindow")
+        self._setup_pipeline()
         self._setup_ui()
         self._setup_connections()
         self._setup_shortcuts()
@@ -174,11 +151,13 @@ class MainWindow(QMainWindow):
         self.vad_label = QLabel("VAD: Idle")
         self.model_label = QLabel(f"Model: {self.config.model.default_model}")
         self.device_label = QLabel("Device: CPU")
+        self.queue_label = QLabel("Queue: 0")
         
         self.status_bar.addWidget(self.status_label, stretch=1)
         self.status_bar.addWidget(self.vad_label)
         self.status_bar.addWidget(self.model_label)
         self.status_bar.addWidget(self.device_label)
+        self.status_bar.addWidget(self.queue_label)
         
         # Progress bar (hidden by default)
         self.progress_bar = QProgressBar()
@@ -204,7 +183,7 @@ class MainWindow(QMainWindow):
     def _setup_connections(self):
         """Setup signal/slot connections."""
         # Audio capture callbacks (thread-safe via signals)
-        self.audio_capture.on_audio_ready = self._on_audio_ready_threadsafe
+        self.audio_capture.on_recording_ready = self._on_recording_ready_threadsafe
         self.audio_capture.on_state_change = self._on_state_change_threadsafe
         self.audio_capture.on_speech_detected = self._on_speech_detected_threadsafe
         
@@ -236,9 +215,9 @@ class MainWindow(QMainWindow):
         shortcut_copy = QShortcut(QKeySequence("Ctrl+Shift+C"), self)
         shortcut_copy.activated.connect(self._copy_to_clipboard)
     
-    def _on_audio_ready_threadsafe(self, audio_data):
-        """Thread-safe wrapper for audio ready callback."""
-        self.audio_signals.audio_ready.emit(audio_data)
+    def _on_recording_ready_threadsafe(self, recording):
+        """Thread-safe wrapper for recording ready callback."""
+        self.audio_signals.recording_ready.emit(recording)
     
     def _on_state_change_threadsafe(self, state):
         """Thread-safe wrapper for state change callback."""
@@ -248,29 +227,44 @@ class MainWindow(QMainWindow):
         """Thread-safe wrapper for speech detection callback."""
         self.audio_signals.vad_detected.emit(is_speech)
     
-    def _handle_audio_ready(self, audio_data):
-        """Handle audio ready (main thread)."""
-        logger.info(f"Audio ready: {len(audio_data)} samples")
-        
-        # Check if a transcription is already in progress
-        if self.worker and self.worker.isRunning():
-            logger.warning("Transcription already in progress, waiting for completion...")
-            # Wait for current transcription to finish (with timeout)
-            if not self.worker.wait(500):  # Wait up to 500ms
-                logger.error("Previous transcription still running, skipping this chunk")
-                return
-        
-        # Run transcription in background thread
-        self.worker = TranscriptionWorker(self.transcriber)
-        self.worker.transcription_ready.connect(self._on_transcription_complete)
-        self.worker.error_occurred.connect(self._on_worker_error)
-        self.worker.set_audio(audio_data)
-        
-        self.status_label.setText("Transcribing...")
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, 0)  # Indeterminate
-        
-        self.worker.start()
+    def _handle_recording_ready(self, recording):
+        """Handle finalized recording (main thread).
+
+        This is the durable boundary: we spool to disk first (never drop due to
+        transcription backlog), then enqueue a job to the sequential pipeline.
+        """
+        if not self.spool or not self.pipeline:
+            logger.error("Pipeline not initialized; cannot accept recording")
+            return
+
+        try:
+            job = self.spool.enqueue(recording)
+        except Exception as e:
+            # Disk-low or write failure: stop recording and show error.
+            logger.error(f"Failed to spool recording: {e}")
+            if self.is_recording:
+                self._stop_recording()
+            QMessageBox.critical(
+                self,
+                "Recording Stopped",
+                "CripIt stopped recording because it could not spool the next recording segment.\n\n"
+                f"Reason: {e}\n\n"
+                "Spool directory: output/spool\n"
+                "Failed jobs (if any) are kept in: output/spool/failed",
+            )
+            return
+
+        self.pipeline.enqueue(job)
+
+        if self.spool.should_stop_for_low_disk() and self.is_recording:
+            logger.warning("Low disk detected after spooling; stopping recording")
+            self._stop_recording()
+            QMessageBox.warning(
+                self,
+                "Low Disk Space",
+                "Disk space is running low. Recording has been stopped to avoid dropping segments.\n\n"
+                "Free up space and start recording again.",
+            )
     
     def _handle_vad_detected(self, is_speech):
         """Handle VAD detection (main thread)."""
@@ -348,37 +342,41 @@ class MainWindow(QMainWindow):
         
         logger.info("Recording stopped")
     
-    def _on_transcription_complete(self, text: str, duration: float):
-        """Handle completed transcription."""
-        logger.info(f"Transcription complete: {len(text)} chars")
-        
-        # Append to text display
+    def _handle_backlog_changed(self, queued: int, processing: int):
+        self.queue_label.setText(f"Queue: {queued}{' (processing)' if processing else ''}")
+
+    def _handle_job_started(self, seq: int):
+        self.status_label.setText(f"Transcribing job #{seq}...")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+
+    def _handle_job_done(self, seq: int, text: str, duration: float):
+        logger.info(f"Job #{seq} complete: {len(text)} chars")
         if text.strip():
             current = self.text_display.toPlainText()
             if current:
                 self.text_display.append("")
             self.text_display.append(text)
-            
-            # Auto-copy if enabled
             if self.config.ui.auto_copy:
                 self._copy_to_clipboard()
-        
-        self.status_label.setText("Ready")
-        self.progress_bar.setVisible(False)
-        
-        # Show stats in status bar
+
         stats = self.transcriber.get_stats()
         self.status_label.setText(
-            f"Transcribed {len(text)} chars | "
-            f"RTF: {stats.get('avg_realtime_factor', 0):.2f}x"
+            f"Job #{seq} done | {len(text)} chars | RTF: {stats.get('avg_realtime_factor', 0):.2f}x"
         )
-    
-    def _on_worker_error(self, error_msg: str):
-        """Handle worker error."""
-        logger.error(f"Transcription error: {error_msg}")
-        self.status_label.setText(f"Error: {error_msg}")
-        self.progress_bar.setVisible(False)
-        QMessageBox.warning(self, "Transcription Error", error_msg)
+
+        # Hide progress bar if nothing is queued
+        if self.pipeline and self.pipeline.backlog().queued == 0:
+            self.progress_bar.setVisible(False)
+
+    def _handle_job_failed(self, seq: int, error: str, failed_path: str):
+        logger.error(f"Job #{seq} failed: {error}")
+        self.status_label.setText(f"Job #{seq} failed")
+        QMessageBox.warning(
+            self,
+            "Transcription Failed",
+            f"Job #{seq} failed and was kept for debugging.\n\nError: {error}\n\nFile: {failed_path}",
+        )
     
     def _on_transcription(self, result):
         """Handle transcription result (from async worker)."""
@@ -560,8 +558,45 @@ class MainWindow(QMainWindow):
         self.config.save_config()
         
         # Stop worker
-        if self.worker and self.worker.isRunning():
-            self.worker.stop()
+        if self.pipeline:
+            try:
+                self.pipeline.stop(timeout=2.0)
+            except Exception:
+                pass
         
         logger.info("Application closed")
         event.accept()
+
+    def _setup_pipeline(self):
+        """Initialize spool + sequential transcription pipeline."""
+        try:
+            from core.recording_spool import RecordingSpool
+            from core.transcription_pipeline import TranscriptionPipeline
+
+            spool_dir = Path("output") / "spool"
+            # Config extension may add config.spool later; keep a safe default.
+            cfg_spool = getattr(self.config, "spool", None)
+            if cfg_spool is not None:
+                spool_dir = Path(getattr(cfg_spool, "dir", str(spool_dir)))
+                soft_mb = int(getattr(cfg_spool, "soft_min_free_mb", 1024))
+                hard_mb = int(getattr(cfg_spool, "hard_reserve_mb", 256))
+            else:
+                soft_mb = 1024
+                hard_mb = 256
+
+            self.spool = RecordingSpool(spool_dir, soft_min_free_mb=soft_mb, hard_reserve_mb=hard_mb)
+            self.pipeline = TranscriptionPipeline(spool_root=spool_dir, transcriber=self.transcriber)
+
+            self.pipeline.on_backlog_changed = lambda b: self.pipeline_signals.backlog_changed.emit(b.queued, b.processing)
+            self.pipeline.on_job_started = lambda job: self.pipeline_signals.job_started.emit(int(job.seq))
+            self.pipeline.on_job_done = lambda job, result: self.pipeline_signals.job_done.emit(int(job.seq), str(result.text), float(result.duration))
+            self.pipeline.on_job_failed = lambda job, err, path: self.pipeline_signals.job_failed.emit(int(job.seq), str(err), str(path))
+
+            self.pipeline.start()
+            recovered = self.pipeline.recover()
+            if recovered:
+                logger.info(f"Recovered {recovered} queued job(s) from spool")
+        except Exception as e:
+            logger.exception(f"Failed to initialize spool pipeline: {e}")
+            self.spool = None
+            self.pipeline = None

@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from enum import Enum, auto
 import numpy as np
 
+from core.recording_spool import FinalizedRecording
+
 logger = logging.getLogger(__name__)
 
 # Try different VAD implementations
@@ -174,6 +176,7 @@ class AudioCapture:
                  vad_type: str = "webrtc",
                  vad_aggressiveness: int = 2,
                  silence_timeout: float = 1.5,
+                 max_recording_duration: float = 30.0,
                  device_index: Optional[int] = None,
                  gain_db: float = 0.0):
         """
@@ -193,6 +196,7 @@ class AudioCapture:
         self.channels = channels
         self.chunk_size = chunk_size
         self.silence_timeout = silence_timeout
+        self.max_recording_duration = max_recording_duration
         self.device_index = device_index
         self.gain_db = gain_db
         
@@ -204,6 +208,7 @@ class AudioCapture:
         logger.info(f"Chunk size: {chunk_size}")
         logger.info(f"VAD type: {vad_type}")
         logger.info(f"Silence timeout: {silence_timeout}s")
+        logger.info(f"Max recording duration: {max_recording_duration}s")
         logger.info(f"Device index: {device_index if device_index is not None else 'default'}")
         logger.info(f"Gain: {gain_db} dB")
         
@@ -219,6 +224,7 @@ class AudioCapture:
         # State
         self.state = RecordingState.IDLE
         self.audio_buffer: List[AudioChunk] = []
+        self._buffered_samples: int = 0
         self.silence_start_time: Optional[float] = None
         
         # Threading
@@ -228,6 +234,7 @@ class AudioCapture:
         
         # Callbacks
         self.on_audio_ready: Optional[Callable[[np.ndarray], None]] = None
+        self.on_recording_ready: Optional[Callable[[FinalizedRecording], None]] = None
         self.on_state_change: Optional[Callable[[RecordingState], None]] = None
         self.on_speech_detected: Optional[Callable[[bool], None]] = None
         
@@ -316,7 +323,17 @@ class AudioCapture:
             
             if self.state == RecordingState.RECORDING:
                 self.audio_buffer.append(chunk)
+                self._buffered_samples += int(chunk.data.size)
                 self.silence_start_time = None
+
+                # Hard cap segment length during continuous speech
+                if self.max_recording_duration and self.max_recording_duration > 0:
+                    buffered_s = self._buffered_samples / float(self.sample_rate)
+                    if buffered_s >= float(self.max_recording_duration):
+                        logger.info(
+                            f"Max segment duration reached ({buffered_s:.1f}s), finalizing and continuing recording"
+                        )
+                        self._finalize_audio(resume_state=RecordingState.RECORDING)
             
             # Notify speech detection
             if self.on_speech_detected:
@@ -330,6 +347,7 @@ class AudioCapture:
             if self.state == RecordingState.RECORDING:
                 # Still record a bit of silence for context
                 self.audio_buffer.append(chunk)
+                self._buffered_samples += int(chunk.data.size)
                 
                 # Check if silence timeout reached
                 if self.silence_start_time is None:
@@ -339,7 +357,7 @@ class AudioCapture:
                 silence_duration = current_time - self.silence_start_time
                 if silence_duration >= self.silence_timeout:
                     logger.info(f"Silence timeout reached ({silence_duration:.1f}s), finalizing audio...")
-                    self._finalize_audio()
+                    self._finalize_audio(resume_state=RecordingState.LISTENING)
                     self._set_state(RecordingState.LISTENING)
                     self.silence_start_time = None
             
@@ -357,34 +375,65 @@ class AudioCapture:
         except queue.Full:
             logger.warning("Audio queue full, dropping chunk")
     
-    def _finalize_audio(self):
-        """Finalize current audio buffer and emit."""
+    def _finalize_audio(self, *, resume_state: RecordingState = RecordingState.LISTENING):
+        """Finalize current audio buffer and emit.
+
+        resume_state controls what state we return to after emitting.
+        - LISTENING: typical end-of-utterance finalize
+        - RECORDING: forced segment split during continuous speech
+        """
         if not self.audio_buffer:
             return
         
         try:
             # Concatenate all audio chunks
+            chunk_count = len(self.audio_buffer)
             audio_data = np.concatenate([chunk.data for chunk in self.audio_buffer])
             duration = len(audio_data) / self.sample_rate
+
+            # Timestamp bounds
+            start_ts = float(self.audio_buffer[0].timestamp) if self.audio_buffer else time.time() - duration
+            last = self.audio_buffer[-1]
+            end_ts = float(last.timestamp) + (len(last.data) / float(self.sample_rate))
             
             logger.info(f"Finalizing audio: {len(self.audio_buffer)} chunks, {duration:.1f}s")
             
             # Clear buffer
             self.audio_buffer = []
+            self._buffered_samples = 0
             
-            # Emit audio
-            if self.on_audio_ready:
-                try:
-                    self._set_state(RecordingState.PROCESSING)
+            # Emit recording (preferred)
+            recording = FinalizedRecording(
+                audio_int16=audio_data,
+                sample_rate=self.sample_rate,
+                channels=self.channels,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                chunks=chunk_count,
+            )
+
+            prev_state = self.state
+            self._set_state(RecordingState.PROCESSING)
+
+            try:
+                if self.on_recording_ready:
+                    self.on_recording_ready(recording)
+                if self.on_audio_ready:
+                    # Backward-compatible hook
                     self.on_audio_ready(audio_data)
-                except Exception as e:
-                    logger.error(f"Audio ready callback error: {e}")
-                finally:
-                    self._set_state(RecordingState.LISTENING)
+            except Exception as e:
+                logger.error(f"Audio ready callback error: {e}")
+            finally:
+                # Restore requested state (or previous state if stopping)
+                if self._stop_event.is_set():
+                    self._set_state(prev_state)
+                else:
+                    self._set_state(resume_state)
             
         except Exception as e:
             logger.error(f"Error finalizing audio: {e}")
             self.audio_buffer = []
+            self._buffered_samples = 0
     
     def start(self) -> bool:
         """Start audio capture."""
@@ -566,7 +615,7 @@ class AudioCapture:
         
         # Finalize any pending audio
         if self.audio_buffer:
-            self._finalize_audio()
+            self._finalize_audio(resume_state=RecordingState.LISTENING)
         
         # Stop and close stream
         if self._stream:
@@ -690,6 +739,7 @@ def create_audio_capture(config=None) -> AudioCapture:
             vad_type="silero" if SILERO_AVAILABLE else "webrtc",
             vad_aggressiveness=config.audio.vad_aggressiveness,
             silence_timeout=config.audio.silence_timeout,
+            max_recording_duration=getattr(config.audio, 'max_recording_duration', 30.0),
             device_index=device_index,
             gain_db=gain_db
         )

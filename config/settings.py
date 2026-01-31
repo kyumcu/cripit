@@ -113,6 +113,29 @@ class UISettings:
         return f"UISettings(title={self.window_title}, output={self.output_dir})"
 
 
+@dataclass
+class SpoolSettings:
+    """Disk-backed recording spool settings."""
+
+    # Root directory for the recording spool (queued/processing/failed)
+    dir: str = str(BASE_DIR / "output" / "spool")
+
+    # If free space falls below this after spooling, we stop recording soon.
+    soft_min_free_mb: int = 1024
+
+    # If free space is below (job_size + reserve), we refuse to spool and stop.
+    hard_reserve_mb: int = 256
+
+    def __post_init__(self):
+        Path(self.dir).mkdir(parents=True, exist_ok=True)
+
+    def __repr__(self):
+        return (
+            f"SpoolSettings(dir={self.dir}, soft_min_free_mb={self.soft_min_free_mb}, "
+            f"hard_reserve_mb={self.hard_reserve_mb})"
+        )
+
+
 class AppConfig:
     """Main application configuration singleton."""
     
@@ -136,6 +159,7 @@ class AppConfig:
         self.audio = AudioSettings()
         self.model = ModelSettings()
         self.ui = UISettings()
+        self.spool = SpoolSettings()
         
         # Load saved config if exists
         self._load_config()
@@ -171,6 +195,12 @@ class AppConfig:
                         if hasattr(self.ui, key):
                             setattr(self.ui, key, value)
                             logger.debug(f"Loaded ui.{key} = {value}")
+
+                if 'spool' in data:
+                    for key, value in data['spool'].items():
+                        if hasattr(self.spool, key):
+                            setattr(self.spool, key, value)
+                            logger.debug(f"Loaded spool.{key} = {value}")
                 
                 logger.info("Configuration loaded successfully")
             except Exception as e:
@@ -207,6 +237,11 @@ class AppConfig:
                     'minimize_to_tray': self.ui.minimize_to_tray,
                     'global_hotkey': self.ui.global_hotkey,
                     'output_dir': self.ui.output_dir,
+                },
+                'spool': {
+                    'dir': self.spool.dir,
+                    'soft_min_free_mb': self.spool.soft_min_free_mb,
+                    'hard_reserve_mb': self.spool.hard_reserve_mb,
                 }
             }
             
