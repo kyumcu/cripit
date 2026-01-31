@@ -71,6 +71,11 @@ def test_initialize_settings_dialog(qt_app, config, model_manager):
     assert dialog.delete_btn is not None
     assert dialog.reinstall_btn is not None
     assert dialog.progress_bar is not None
+
+    # CUDA UI controls
+    assert hasattr(dialog, "use_cuda_checkbox"), "Settings dialog should include GPU toggle"
+    assert hasattr(dialog, "cuda_device_spinbox"), "Settings dialog should include CUDA device selector"
+    assert hasattr(dialog, "cuda_status_label"), "Settings dialog should include CUDA status label"
     
     logger.info(f"Settings dialog initialized")
     logger.info(f"Model list has {dialog.model_list.count()} items")

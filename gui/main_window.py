@@ -173,10 +173,12 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("Ready")
         self.vad_label = QLabel("VAD: Idle")
         self.model_label = QLabel(f"Model: {self.config.model.default_model}")
+        self.device_label = QLabel("Device: CPU")
         
         self.status_bar.addWidget(self.status_label, stretch=1)
         self.status_bar.addWidget(self.vad_label)
         self.status_bar.addWidget(self.model_label)
+        self.status_bar.addWidget(self.device_label)
         
         # Progress bar (hidden by default)
         self.progress_bar = QProgressBar()
@@ -391,6 +393,10 @@ class MainWindow(QMainWindow):
         """Handle model loaded."""
         logger.info("Model loaded")
         self.model_label.setText(f"Model: {self.transcriber.model_name}")
+        try:
+            self.device_label.setText(f"Device: {self.transcriber.get_device_name()}")
+        except Exception:
+            self.device_label.setText("Device: Unknown")
     
     def _on_model_changed(self, index):
         """Handle model selection change."""
@@ -400,6 +406,7 @@ class MainWindow(QMainWindow):
         # Unload current model
         self.transcriber.unload_model()
         self.model_label.setText(f"Model: {model} (not loaded)")
+        self.device_label.setText("Device: -")
         
         # Check if available
         if not self.model_manager.is_model_available(model):
@@ -504,6 +511,19 @@ class MainWindow(QMainWindow):
             dialog = SettingsDialog(self.config, self.model_manager, self)
             dialog.models_changed.connect(self._on_models_changed)
             dialog.exec()
+
+            # Apply (potentially updated) CUDA settings to current transcriber
+            try:
+                self.transcriber.use_cuda = getattr(self.config.model, "use_cuda", True)
+                self.transcriber.cuda_device = getattr(self.config.model, "cuda_device", 0)
+                logger.info(
+                    f"Applied CUDA settings from config: use_cuda={self.transcriber.use_cuda}, "
+                    f"cuda_device={self.transcriber.cuda_device}"
+                )
+                if hasattr(self, "device_label"):
+                    self.device_label.setText(f"Device: {self.transcriber.get_device_name()}")
+            except Exception as e:
+                logger.warning(f"Could not apply CUDA settings to transcriber: {e}")
             
             logger.info("Settings dialog closed")
             

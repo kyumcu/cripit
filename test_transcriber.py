@@ -78,18 +78,25 @@ def test_transcriber_initialization():
             model_name="large-v3-turbo",
             language="en",
             n_threads=4,
-            translate=False
+            translate=False,
+            use_cuda=True,
+            cuda_device=0,
+            gpu_layers=-1,
         )
         
         print(f"✓ Transcriber initialized")
         print(f"✓ Model name: {transcoder.model_name}")
         print(f"✓ Language: {transcoder.language}")
         print(f"✓ Threads: {transcoder.n_threads}")
+        print(f"✓ Use CUDA: {transcoder.use_cuda}")
+        print(f"✓ CUDA device: {transcoder.cuda_device}")
         print(f"✓ Ready: {transcoder.is_ready()}")
         
         assert transcoder.model_name == "large-v3-turbo"
         assert transcoder.language == "en"
         assert transcoder.n_threads == 4
+        assert transcoder.use_cuda == True
+        assert transcoder.cuda_device == 0
         assert not transcoder.is_ready()  # Not loaded yet
         
         return True
@@ -182,12 +189,16 @@ def test_config_factory():
         print(f"✓ Language: {transcoder.language}")
         print(f"✓ Threads: {transcoder.n_threads}")
         print(f"✓ Translate: {transcoder.translate}")
+        print(f"✓ Use CUDA: {getattr(transcoder, 'use_cuda', None)}")
+        print(f"✓ CUDA device: {getattr(transcoder, 'cuda_device', None)}")
         
         # Verify config values applied
         assert transcoder.model_name == config.model.default_model
         assert transcoder.language == config.model.language
         assert transcoder.n_threads == config.model.n_threads
         assert transcoder.translate == config.model.translate
+        assert getattr(transcoder, 'use_cuda', None) == config.model.use_cuda
+        assert getattr(transcoder, 'cuda_device', None) == config.model.cuda_device
         
         return True
     except Exception as e:

@@ -24,7 +24,7 @@ def run_tests():
     results = {}
     
     # Test 1: Configuration
-    print("\n[1/5] Running Configuration Tests...")
+    print("\n[1/6] Running Configuration Tests...")
     try:
         import test_config
         success = test_config.run_all_tests()
@@ -34,7 +34,7 @@ def run_tests():
         results['config'] = 'ERROR'
     
     # Test 2: Audio Capture
-    print("\n[2/5] Running Audio Capture Tests...")
+    print("\n[2/6] Running Audio Capture Tests...")
     try:
         import test_audio
         success = test_audio.run_all_tests()
@@ -44,7 +44,7 @@ def run_tests():
         results['audio'] = 'ERROR'
     
     # Test 3: Transcriber
-    print("\n[3/5] Running Transcriber Tests...")
+    print("\n[3/6] Running Transcriber Tests...")
     try:
         import test_transcriber
         success = test_transcriber.run_all_tests()
@@ -54,7 +54,7 @@ def run_tests():
         results['transcriber'] = 'ERROR'
     
     # Test 4: Model Manager
-    print("\n[4/5] Running Model Manager Tests...")
+    print("\n[4/6] Running Model Manager Tests...")
     try:
         import test_model_manager
         success = test_model_manager.run_all_tests()
@@ -64,7 +64,7 @@ def run_tests():
         results['model_manager'] = 'ERROR'
     
     # Test 5: Integration
-    print("\n[5/5] Running Integration Tests...")
+    print("\n[5/6] Running Integration Tests...")
     try:
         import test_integration
         success = test_integration.run_all_tests()
@@ -72,6 +72,16 @@ def run_tests():
     except Exception as e:
         print(f"  Error: {e}")
         results['integration'] = 'ERROR'
+
+    # Test 6: CUDA Utilities
+    print("\n[6/6] Running CUDA Utils Tests...")
+    try:
+        import test_cuda_utils
+        success = test_cuda_utils.run_all_tests()
+        results['cuda_utils'] = 'PASS' if success else 'FAIL'
+    except Exception as e:
+        print(f"  Error: {e}")
+        results['cuda_utils'] = 'ERROR'
     
     # Summary
     print("\n" + "="*70)

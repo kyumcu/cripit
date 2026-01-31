@@ -68,11 +68,18 @@ class ModelSettings:
     n_threads: int = 4
     max_context: int = -1
     
+    # CUDA/GPU settings
+    use_cuda: bool = True  # Try to use CUDA if available
+    cuda_device: int = 0  # GPU device ID (for multi-GPU systems)
+    cuda_fallback_to_cpu: bool = True  # Automatically fall back to CPU if CUDA fails
+    cuda_warn_on_fallback: bool = True  # Show warning when falling back to CPU
+    
     def __post_init__(self):
         logger.info(f"ModelSettings initialized with default model: {self.default_model}")
+        logger.info(f"CUDA settings: use_cuda={self.use_cuda}, device={self.cuda_device}, fallback={self.cuda_fallback_to_cpu}")
     
     def __repr__(self):
-        return f"ModelSettings(default_model={self.default_model}, language={self.language})"
+        return f"ModelSettings(default_model={self.default_model}, language={self.language}, use_cuda={self.use_cuda})"
 
 
 @dataclass
@@ -156,6 +163,8 @@ class AppConfig:
                         if hasattr(self.model, key) and key != 'available_models':
                             setattr(self.model, key, value)
                             logger.debug(f"Loaded model.{key} = {value}")
+                    # Log CUDA settings after loading
+                    logger.info(f"Loaded CUDA config: use_cuda={self.model.use_cuda}, device={self.model.cuda_device}")
                 
                 if 'ui' in data:
                     for key, value in data['ui'].items():
@@ -188,6 +197,10 @@ class AppConfig:
                     'language': self.model.language,
                     'translate': self.model.translate,
                     'n_threads': self.model.n_threads,
+                    'use_cuda': self.model.use_cuda,
+                    'cuda_device': self.model.cuda_device,
+                    'cuda_fallback_to_cpu': self.model.cuda_fallback_to_cpu,
+                    'cuda_warn_on_fallback': self.model.cuda_warn_on_fallback,
                 },
                 'ui': {
                     'auto_copy': self.ui.auto_copy,

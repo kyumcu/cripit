@@ -46,28 +46,37 @@ class Transcriber:
     Supports multiple models and real-time transcription.
     """
     
-    def __init__(self, 
+    def __init__(self,
                  model_path: Optional[str] = None,
                  model_name: str = "large-v3-turbo",
                  language: Optional[str] = None,
                  n_threads: int = 4,
-                 translate: bool = False):
+                 translate: bool = False,
+                 use_cuda: bool = True,
+                 cuda_device: int = 0,
+                 gpu_layers: int = -1):
         """
         Initialize transcriber.
-        
+
         Args:
             model_path: Direct path to GGML model file
             model_name: Model name (if model_path not provided)
             language: Language code (e.g., 'en', 'fr') or None for auto-detect
             n_threads: Number of threads for inference
             translate: Whether to translate to English
+            use_cuda: Whether to try using GPU/CUDA if available
+            cuda_device: GPU device ID (for multi-GPU systems)
+            gpu_layers: Number of layers to offload to GPU (-1 = auto/all)
         """
         self.model_path = model_path
         self.model_name = model_name
         self.language = language
         self.n_threads = n_threads
         self.translate = translate
-        
+        self.use_cuda = use_cuda
+        self.cuda_device = cuda_device
+        self.gpu_layers = gpu_layers
+
         logger.info("=" * 50)
         logger.info("Initializing Transcriber")
         logger.info("=" * 50)
@@ -75,6 +84,9 @@ class Transcriber:
         logger.info(f"Language: {language or 'auto-detect'}")
         logger.info(f"Threads: {n_threads}")
         logger.info(f"Translate: {translate}")
+        logger.info(f"Use CUDA: {use_cuda}")
+        logger.info(f"CUDA Device: {cuda_device}")
+        logger.info(f"GPU Layers: {gpu_layers}")
         
         # Model instance
         self._model: Optional[Any] = None
@@ -99,6 +111,10 @@ class Transcriber:
         self._total_audio_seconds = 0.0
         self._total_processing_seconds = 0.0
         
+        # GPU/Device info
+        self._using_gpu = False
+        self._device_name = "CPU"
+        
         logger.info("Transcriber initialized (model not loaded yet)")
     
     def load_model(self, model_path: Optional[str] = None) -> bool:
@@ -113,6 +129,10 @@ class Transcriber:
         """
         if not PYWHISPERCPP_AVAILABLE:
             logger.error("Cannot load model - pywhispercpp not available")
+            return False
+
+        if Model is None:
+            logger.error("Cannot load model - pywhispercpp Model class not available")
             return False
         
         if self._model_loaded:
@@ -134,9 +154,41 @@ class Transcriber:
         try:
             logger.info(f"Loading model from: {model_file}")
             logger.info(f"Model file size: {model_file.stat().st_size / (1024**3):.2f} GB")
+
+            # Check CUDA availability if requested
+            using_gpu = False
+            device_name = "CPU"
             
+            if self.use_cuda:
+                try:
+                    from utils.cuda_utils import CUDAManager
+                    cuda_manager = CUDAManager()
+                    cuda_status = cuda_manager.detect_cuda()
+
+                    if cuda_status.available and getattr(cuda_status, "pywhispercpp_cuda", False):
+                        # pywhispercpp does not provide a reliable runtime switch to force CPU when built with CUDA.
+                        # If the model does not fit, attempting to load can abort the process.
+                        fits, msg = cuda_manager.check_model_fits_gpu(self.model_name, self.cuda_device)
+
+                        if not fits:
+                            logger.error(f"{msg}")
+                            logger.error("Model will not be loaded to avoid a CUDA/OOM abort. Choose a smaller model.")
+                            return False
+
+                        using_gpu = True
+                        device_name = f"GPU (device {self.cuda_device})"
+                        logger.info(f"✓ CUDA detected - {msg}")
+                    elif cuda_status.available and not getattr(cuda_status, "pywhispercpp_cuda", False):
+                        logger.info("CUDA detected but pywhispercpp is not CUDA-enabled - using CPU mode")
+                    else:
+                        logger.info("CUDA not available - using CPU mode")
+                except ImportError:
+                    logger.debug("CUDA utils not available - using CPU mode")
+                except Exception as e:
+                    logger.warning(f"CUDA check failed: {e} - using CPU mode")
+
             load_start = time.time()
-            
+
             # Load model with parameters
             params = {
                 'language': self.language,
@@ -146,26 +198,48 @@ class Transcriber:
                 'print_realtime': False,
             }
             
+            # Add GPU parameters if using GPU
+            # NOTE: whisper.cpp GPU acceleration (CUDA) is enabled at build-time.
+            # pywhispercpp does not expose llama.cpp-style GPU offload params like
+            # `n_gpu_layers`; passing unknown params can raise exceptions (or worse).
+            if using_gpu:
+                logger.info("GPU mode enabled (CUDA build); no extra load params required")
+
             # Remove None values
             params = {k: v for k, v in params.items() if v is not None}
-            
+
+            logger.info(f"Loading model on {device_name}...")
             self._model = Model(str(model_file), **params)
-            
+
             load_time = time.time() - load_start
-            
+
             self._model_loaded = True
-            logger.info(f"Model loaded successfully in {load_time:.2f}s")
-            
+            self._using_gpu = using_gpu
+            self._device_name = device_name
+            logger.info(f"✓ Model loaded successfully on {device_name} in {load_time:.2f}s")
+
             if self.on_model_loaded:
                 try:
                     self.on_model_loaded()
                 except Exception as e:
                     logger.error(f"Model loaded callback error: {e}")
-            
+
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
+            
+            # If CUDA failed, try fallback to CPU
+            if self.use_cuda:
+                try:
+                    from config.settings import config
+                    if config.model.cuda_fallback_to_cpu:
+                        logger.info("Attempting fallback to CPU mode...")
+                        self.use_cuda = False
+                        return self.load_model(model_path)
+                except:
+                    pass
+            
             if self.on_error:
                 try:
                     self.on_error(e)
@@ -365,6 +439,14 @@ class Transcriber:
     def is_ready(self) -> bool:
         """Check if transcriber is ready (model loaded)."""
         return self._model_loaded and self._model is not None
+
+    def is_using_gpu(self) -> bool:
+        """Return True if the currently loaded model is using GPU."""
+        return bool(getattr(self, "_using_gpu", False))
+
+    def get_device_name(self) -> str:
+        """Return a human-readable device name (CPU/GPU)."""
+        return str(getattr(self, "_device_name", "CPU"))
     
     def get_stats(self) -> Dict[str, Any]:
         """Get transcription statistics."""
@@ -378,6 +460,8 @@ class Transcriber:
             'avg_realtime_factor': avg_rtf,
             'model_loaded': self._model_loaded,
             'model_name': self.model_name,
+            'using_gpu': self.is_using_gpu(),
+            'device': self.get_device_name(),
         }
     
     def __enter__(self):
@@ -426,7 +510,9 @@ class MultiModelTranscriber:
                 model_path=model_path,
                 model_name=name,
                 language=language,
-                n_threads=self.config.model.n_threads if self.config else 4
+                n_threads=self.config.model.n_threads if self.config else 4,
+                use_cuda=self.config.model.use_cuda if self.config else True,
+                cuda_device=self.config.model.cuda_device if self.config else 0,
             )
             
             self.transcribers[name] = transcoder
@@ -493,7 +579,9 @@ def create_transcriber(config=None, model_path: Optional[str] = None) -> Transcr
             model_name=config.model.default_model,
             language=config.model.language,
             n_threads=config.model.n_threads,
-            translate=config.model.translate
+            translate=config.model.translate,
+            use_cuda=getattr(config.model, "use_cuda", True),
+            cuda_device=getattr(config.model, "cuda_device", 0),
         )
     else:
         return Transcriber(model_path=model_path)

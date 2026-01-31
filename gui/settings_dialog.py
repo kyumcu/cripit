@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QListWidget, QListWidgetItem, QMessageBox,
     QGroupBox, QProgressBar, QSplitter, QTextEdit,
-    QComboBox, QSlider, QSpinBox
+    QComboBox, QSlider, QSpinBox, QCheckBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread
 from PyQt6.QtGui import QFont
@@ -150,6 +150,52 @@ class SettingsDialog(QDialog):
         audio_layout.addLayout(apply_layout)
         
         layout.addWidget(audio_group)
+
+        # === GPU / CUDA Settings Group ===
+        cuda_group = QGroupBox("GPU Acceleration (CUDA)")
+        cuda_layout = QVBoxLayout(cuda_group)
+
+        self.cuda_status_label = QLabel("CUDA status: checking...")
+        self.cuda_status_label.setWordWrap(True)
+        cuda_layout.addWidget(self.cuda_status_label)
+
+        self.use_cuda_checkbox = QCheckBox("Enable GPU acceleration when available")
+        self.use_cuda_checkbox.setChecked(bool(getattr(self.config.model, "use_cuda", True)))
+        cuda_layout.addWidget(self.use_cuda_checkbox)
+
+        cuda_device_layout = QHBoxLayout()
+        cuda_device_layout.addWidget(QLabel("CUDA device:"))
+        self.cuda_device_spinbox = QSpinBox()
+        self.cuda_device_spinbox.setRange(0, 16)
+        self.cuda_device_spinbox.setValue(int(getattr(self.config.model, "cuda_device", 0)))
+        cuda_device_layout.addWidget(self.cuda_device_spinbox)
+        cuda_device_layout.addStretch()
+        cuda_layout.addLayout(cuda_device_layout)
+
+        self.cuda_fallback_checkbox = QCheckBox("Auto-fallback to CPU if GPU fails")
+        self.cuda_fallback_checkbox.setChecked(bool(getattr(self.config.model, "cuda_fallback_to_cpu", True)))
+        cuda_layout.addWidget(self.cuda_fallback_checkbox)
+
+        self.cuda_warn_checkbox = QCheckBox("Warn when falling back to CPU")
+        self.cuda_warn_checkbox.setChecked(bool(getattr(self.config.model, "cuda_warn_on_fallback", True)))
+        cuda_layout.addWidget(self.cuda_warn_checkbox)
+
+        cuda_buttons = QHBoxLayout()
+        self.cuda_build_btn = QPushButton("Build CUDA Backend...")
+        self.cuda_build_btn.clicked.connect(self._show_cuda_build_instructions)
+        cuda_buttons.addWidget(self.cuda_build_btn)
+
+        self.cuda_refresh_btn = QPushButton("Refresh CUDA Status")
+        self.cuda_refresh_btn.clicked.connect(self._refresh_cuda_status)
+        cuda_buttons.addWidget(self.cuda_refresh_btn)
+
+        cuda_buttons.addStretch()
+        self.apply_cuda_btn = QPushButton("Apply GPU Settings")
+        self.apply_cuda_btn.clicked.connect(self._apply_cuda_settings)
+        cuda_buttons.addWidget(self.apply_cuda_btn)
+        cuda_layout.addLayout(cuda_buttons)
+
+        layout.addWidget(cuda_group)
         
         # === Model Management Group ===
         models_group = QGroupBox("Model Management")
@@ -239,6 +285,9 @@ class SettingsDialog(QDialog):
         
         # Update disk usage
         self._update_disk_usage()
+
+        # Update CUDA status
+        self._refresh_cuda_status()
     
     def _refresh_model_list(self):
         """Refresh the model list."""
@@ -514,6 +563,63 @@ class SettingsDialog(QDialog):
         except Exception as e:
             logger.error(f"Error applying audio settings: {e}")
             QMessageBox.critical(self, "Error", f"Failed to apply audio settings: {str(e)}")
+
+    def _refresh_cuda_status(self):
+        """Refresh CUDA status label (best-effort)."""
+        try:
+            from utils.cuda_utils import CUDAManager
+            cm = CUDAManager()
+            status = cm.detect_cuda(force_check=True)
+
+            if status.available:
+                base = f"CUDA detected (nvcc: {status.nvcc_path or 'unknown'}, version: {status.cuda_version or 'unknown'})"
+            else:
+                base = f"CUDA not detected ({status.error_message or 'unknown reason'})"
+
+            if status.pywhispercpp_cuda:
+                extra = "pywhispercpp: CUDA-linked"
+            else:
+                extra = "pywhispercpp: CPU-only (or not verified)"
+
+            self.cuda_status_label.setText(f"{base} | {extra}")
+            logger.info(f"CUDA status refreshed: available={status.available}, pywhispercpp_cuda={status.pywhispercpp_cuda}")
+        except Exception as e:
+            self.cuda_status_label.setText(f"CUDA status: error checking ({e})")
+            logger.warning(f"Failed to refresh CUDA status: {e}")
+
+    def _apply_cuda_settings(self):
+        """Apply CUDA settings to config."""
+        try:
+            self.config.model.use_cuda = bool(self.use_cuda_checkbox.isChecked())
+            self.config.model.cuda_device = int(self.cuda_device_spinbox.value())
+            self.config.model.cuda_fallback_to_cpu = bool(self.cuda_fallback_checkbox.isChecked())
+            self.config.model.cuda_warn_on_fallback = bool(self.cuda_warn_checkbox.isChecked())
+
+            if self.config.save_config():
+                QMessageBox.information(self, "Success", "GPU settings saved successfully.")
+                logger.info(
+                    "GPU settings saved: "
+                    f"use_cuda={self.config.model.use_cuda}, "
+                    f"cuda_device={self.config.model.cuda_device}, "
+                    f"fallback={self.config.model.cuda_fallback_to_cpu}, "
+                    f"warn={self.config.model.cuda_warn_on_fallback}"
+                )
+            else:
+                QMessageBox.warning(self, "Warning", "Failed to save GPU settings.")
+        except Exception as e:
+            logger.error(f"Error applying GPU settings: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to apply GPU settings: {str(e)}")
+
+    def _show_cuda_build_instructions(self):
+        """Show instructions for building pywhispercpp with CUDA."""
+        QMessageBox.information(
+            self,
+            "Build CUDA Backend",
+            "To enable GPU acceleration, build pywhispercpp with CUDA support:\n\n"
+            "1) Activate your environment:\n  conda activate py_cripit\n\n"
+            "2) Run the build script from the project directory:\n  bash build_cuda.sh\n\n"
+            "After it finishes, click 'Refresh CUDA Status'."
+        )
     
     def closeEvent(self, event):
         """Handle dialog close."""

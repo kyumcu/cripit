@@ -77,6 +77,17 @@ def test_model_settings():
     print(f"✓ File: {turbo_info['file']}")
     print(f"✓ Size: {turbo_info['size_mb']} MB")
     print(f"✓ Available models: {list(model.available_models.keys())}")
+
+    # Check CUDA defaults
+    assert hasattr(model, "use_cuda"), "ModelSettings should include use_cuda"
+    assert hasattr(model, "cuda_device"), "ModelSettings should include cuda_device"
+    assert hasattr(model, "cuda_fallback_to_cpu"), "ModelSettings should include cuda_fallback_to_cpu"
+    assert hasattr(model, "cuda_warn_on_fallback"), "ModelSettings should include cuda_warn_on_fallback"
+
+    print(f"✓ CUDA enabled by default: {model.use_cuda}")
+    print(f"✓ CUDA device: {model.cuda_device}")
+    print(f"✓ CUDA fallback to CPU: {model.cuda_fallback_to_cpu}")
+    print(f"✓ CUDA warn on fallback: {model.cuda_warn_on_fallback}")
     return True
 
 def test_ui_settings():
@@ -138,8 +149,13 @@ def test_config_save_load():
     
     # Modify some settings
     original_lang = config.model.language
+    original_use_cuda = getattr(config.model, "use_cuda", True)
     config.model.language = "en"
     config.audio.vad_enabled = False
+    config.model.use_cuda = True
+    config.model.cuda_device = 0
+    config.model.cuda_fallback_to_cpu = True
+    config.model.cuda_warn_on_fallback = True
     
     # Save
     result = config.save_config()
@@ -157,9 +173,12 @@ def test_config_save_load():
     
     print(f"✓ Language after reload: {config.model.language}")
     print(f"✓ VAD enabled after reload: {config.audio.vad_enabled}")
+    print(f"✓ use_cuda after reload: {config.model.use_cuda}")
+    print(f"✓ cuda_device after reload: {config.model.cuda_device}")
     
     # Restore original
     config.model.language = original_lang
+    config.model.use_cuda = original_use_cuda
     config.audio.vad_enabled = True
     config.save_config()
     print("✓ Configuration restored and saved")

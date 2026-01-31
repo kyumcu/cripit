@@ -289,7 +289,9 @@ def main():
             model_name=config.model.default_model,
             language=config.model.language,
             n_threads=config.model.n_threads,
-            translate=config.model.translate
+            translate=config.model.translate,
+            use_cuda=getattr(config.model, "use_cuda", True),
+            cuda_device=getattr(config.model, "cuda_device", 0),
         )
         logger.info("✓ Transcriber initialized")
         
