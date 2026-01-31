@@ -83,6 +83,7 @@ class SettingsDialog(QDialog):
     """Settings dialog with model management."""
     
     models_changed = pyqtSignal()  # Emitted when models are added/removed
+    config_changed = pyqtSignal()  # Emitted when settings are applied
     
     def __init__(self, config, model_manager, parent=None):
         super().__init__(parent)
@@ -557,6 +558,7 @@ class SettingsDialog(QDialog):
             if self.config.save_config():
                 QMessageBox.information(self, "Success", "Audio settings saved successfully.")
                 logger.info(f"Audio settings saved: device={device_index}, gain={gain_db}dB")
+                self.config_changed.emit()
             else:
                 QMessageBox.warning(self, "Warning", "Failed to save audio settings.")
                 
@@ -604,6 +606,7 @@ class SettingsDialog(QDialog):
                     f"fallback={self.config.model.cuda_fallback_to_cpu}, "
                     f"warn={self.config.model.cuda_warn_on_fallback}"
                 )
+                self.config_changed.emit()
             else:
                 QMessageBox.warning(self, "Warning", "Failed to save GPU settings.")
         except Exception as e:

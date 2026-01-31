@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QFileDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QSize, QObject
-from PyQt6.QtGui import QIcon, QKeySequence, QFont, QAction, QShortcut
+from PyQt6.QtGui import QIcon, QKeySequence, QFont, QAction, QShortcut, QCloseEvent
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,15 @@ class MainWindow(QMainWindow):
         self.spool = None
         self.pipeline = None
         self.is_recording = False
+
+        # Initialize UI fields to satisfy type checkers; real widgets are built in _setup_ui.
+        self.text_display = QTextEdit()
+        self.status_label = QLabel("")
+        self.vad_label = QLabel("")
+        self.model_label = QLabel("")
+        self.device_label = QLabel("")
+        self.queue_label = QLabel("")
+        self.progress_bar = QProgressBar()
         
         # Create signals object for thread-safe callbacks
         self.audio_signals = AudioSignals()
@@ -295,6 +304,9 @@ class MainWindow(QMainWindow):
     def _start_recording(self):
         """Start audio recording."""
         logger.info("Starting recording...")
+
+        # Apply latest config to runtime components before starting capture.
+        self._apply_runtime_settings()
         
         # Check if model is loaded
         if not self.transcriber.is_ready():
@@ -324,6 +336,65 @@ class MainWindow(QMainWindow):
             logger.info("Recording started")
         else:
             QMessageBox.critical(self, "Error", "Failed to start audio capture!")
+
+    def _apply_runtime_settings(self):
+        """Apply config changes to running objects (best-effort).
+
+        Some settings only take effect on the next start of audio capture.
+        """
+        # ---- AudioCapture ----
+        try:
+            # These are safe to update at runtime (used by the capture loop).
+            self.audio_capture.silence_timeout = float(getattr(self.config.audio, "silence_timeout", 1.5))
+            self.audio_capture.max_recording_duration = float(getattr(self.config.audio, "max_recording_duration", 30.0))
+
+            # Gain can be changed live.
+            if hasattr(self.audio_capture, "set_gain"):
+                self.audio_capture.set_gain(float(getattr(self.config.audio, "gain_db", 0.0)))
+
+            # Device switch only applies when not recording.
+            if hasattr(self.audio_capture, "set_device"):
+                self.audio_capture.set_device(getattr(self.config.audio, "device_index", None))
+        except Exception as e:
+            logger.warning(f"Failed to apply audio settings at runtime: {e}")
+
+        # ---- Transcriber ----
+        try:
+            self.transcriber.use_cuda = bool(getattr(self.config.model, "use_cuda", True))
+            self.transcriber.cuda_device = int(getattr(self.config.model, "cuda_device", 0))
+            # These are used during transcription/model load.
+            self.transcriber.n_threads = int(getattr(self.config.model, "n_threads", self.transcriber.n_threads))
+            self.transcriber.translate = bool(getattr(self.config.model, "translate", self.transcriber.translate))
+            self.transcriber.language = getattr(self.config.model, "language", self.transcriber.language)
+        except Exception as e:
+            logger.warning(f"Failed to apply transcriber settings at runtime: {e}")
+
+        # ---- Spool thresholds ----
+        try:
+            if self.spool and hasattr(self.config, "spool"):
+                soft_mb = int(getattr(self.config.spool, "soft_min_free_mb", 1024))
+                hard_mb = int(getattr(self.config.spool, "hard_reserve_mb", 256))
+                self.spool.soft_min_free_bytes = soft_mb * 1024 * 1024
+                self.spool.hard_reserve_bytes = hard_mb * 1024 * 1024
+
+                # Changing spool dir at runtime is only safe when idle.
+                new_dir = Path(getattr(self.config.spool, "dir", str(self.spool.root_dir)))
+                if new_dir.resolve() != Path(self.spool.root_dir).resolve():
+                    backlog = self.pipeline.backlog() if self.pipeline else None
+                    if self.is_recording or (backlog and (backlog.processing or backlog.queued)):
+                        logger.warning("Spool dir changed but pipeline is active; change will take effect after restart")
+                    else:
+                        logger.info(f"Spool dir changed to {new_dir}; reinitializing pipeline")
+                        # Reinitialize pipeline/spool cleanly.
+                        try:
+                            if self.pipeline:
+                                self.pipeline.stop(timeout=2.0)
+                        finally:
+                            self.spool = None
+                            self.pipeline = None
+                        self._setup_pipeline()
+        except Exception as e:
+            logger.warning(f"Failed to apply spool settings at runtime: {e}")
     
     def _stop_recording(self):
         """Stop audio recording."""
@@ -343,6 +414,8 @@ class MainWindow(QMainWindow):
         logger.info("Recording stopped")
     
     def _handle_backlog_changed(self, queued: int, processing: int):
+        if not self.queue_label:
+            return
         self.queue_label.setText(f"Queue: {queued}{' (processing)' if processing else ''}")
 
     def _handle_job_started(self, seq: int):
@@ -380,7 +453,11 @@ class MainWindow(QMainWindow):
     
     def _on_transcription(self, result):
         """Handle transcription result (from async worker)."""
-        logger.info(f"Transcription callback: {len(result.text)} chars")
+        try:
+            txt = getattr(result, "text", "")
+            logger.info(f"Transcription callback: {len(txt)} chars")
+        except Exception:
+            logger.info("Transcription callback")
     
     def _on_transcription_error(self, error):
         """Handle transcription error."""
@@ -474,6 +551,8 @@ class MainWindow(QMainWindow):
         text = self.text_display.toPlainText()
         if text:
             clipboard = QApplication.clipboard()
+            if clipboard is None:
+                return
             clipboard.setText(text)
             self.status_label.setText("Copied to clipboard")
             logger.info("Text copied to clipboard")
@@ -508,20 +587,18 @@ class MainWindow(QMainWindow):
             
             dialog = SettingsDialog(self.config, self.model_manager, self)
             dialog.models_changed.connect(self._on_models_changed)
+            dialog.config_changed.connect(self._apply_runtime_settings)
             dialog.exec()
 
-            # Apply (potentially updated) CUDA settings to current transcriber
+            # Apply updated settings immediately (best-effort)
+            self._apply_runtime_settings()
+
+            # Update device label if available
             try:
-                self.transcriber.use_cuda = getattr(self.config.model, "use_cuda", True)
-                self.transcriber.cuda_device = getattr(self.config.model, "cuda_device", 0)
-                logger.info(
-                    f"Applied CUDA settings from config: use_cuda={self.transcriber.use_cuda}, "
-                    f"cuda_device={self.transcriber.cuda_device}"
-                )
                 if hasattr(self, "device_label"):
                     self.device_label.setText(f"Device: {self.transcriber.get_device_name()}")
-            except Exception as e:
-                logger.warning(f"Could not apply CUDA settings to transcriber: {e}")
+            except Exception:
+                pass
             
             logger.info("Settings dialog closed")
             
@@ -546,7 +623,7 @@ class MainWindow(QMainWindow):
             if index >= 0:
                 self.model_combo.setCurrentIndex(index)
     
-    def closeEvent(self, event):
+    def closeEvent(self, a0: Optional[QCloseEvent]):
         """Handle window close."""
         logger.info("Closing application...")
         
@@ -565,7 +642,8 @@ class MainWindow(QMainWindow):
                 pass
         
         logger.info("Application closed")
-        event.accept()
+        if a0 is not None:
+            a0.accept()
 
     def _setup_pipeline(self):
         """Initialize spool + sequential transcription pipeline."""
@@ -589,7 +667,11 @@ class MainWindow(QMainWindow):
 
             self.pipeline.on_backlog_changed = lambda b: self.pipeline_signals.backlog_changed.emit(b.queued, b.processing)
             self.pipeline.on_job_started = lambda job: self.pipeline_signals.job_started.emit(int(job.seq))
-            self.pipeline.on_job_done = lambda job, result: self.pipeline_signals.job_done.emit(int(job.seq), str(result.text), float(result.duration))
+            self.pipeline.on_job_done = lambda job, result: self.pipeline_signals.job_done.emit(
+                int(job.seq),
+                str(getattr(result, "text", "")),
+                float(getattr(result, "duration", 0.0)),
+            )
             self.pipeline.on_job_failed = lambda job, err, path: self.pipeline_signals.job_failed.emit(int(job.seq), str(err), str(path))
 
             self.pipeline.start()
