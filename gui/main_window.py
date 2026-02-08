@@ -169,10 +169,6 @@ class MainWindow(QMainWindow):
         self.lang_combo.addItems(["Auto-detect", "English", "Spanish", "French", "German", "Italian", "Portuguese", "Chinese", "Japanese", "Korean", "Russian"])
         controls_layout.addWidget(self.lang_combo)
         
-        # Settings button
-        self.settings_btn = QPushButton("Settings...")
-        controls_layout.addWidget(self.settings_btn)
-        
         main_layout.addWidget(controls_group)
         
         # Add main tab
@@ -191,6 +187,21 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"Failed to create converter tab: {e}")
             self.converter_tab = None
+        
+        # === Settings Tab ===
+        try:
+            from gui.settings_tab import SettingsTab
+            self.settings_tab = SettingsTab(
+                config=self.config,
+                model_manager=self.model_manager,
+                parent=self,
+            )
+            self.settings_tab.models_changed.connect(self._on_models_changed)
+            self.settings_tab.config_changed.connect(self._apply_runtime_settings)
+            self.tab_widget.addTab(self.settings_tab, "Settings")
+        except Exception as e:
+            logger.error(f"Failed to create settings tab: {e}")
+            self.settings_tab = None
         
         layout.addWidget(self.tab_widget)
         
@@ -251,7 +262,9 @@ class MainWindow(QMainWindow):
         self.save_btn.clicked.connect(self._save_to_file)
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
         self.lang_combo.currentIndexChanged.connect(self._on_language_changed)
-        self.settings_btn.clicked.connect(self._open_settings)
+        
+        # Tab change handler to refresh settings when selected
+        self.tab_widget.currentChanged.connect(self._on_tab_changed)
     
     def _setup_shortcuts(self):
         """Setup keyboard shortcuts."""
@@ -266,6 +279,12 @@ class MainWindow(QMainWindow):
         # Ctrl+Shift+C - Copy
         shortcut_copy = QShortcut(QKeySequence("Ctrl+Shift+C"), self)
         shortcut_copy.activated.connect(self._copy_to_clipboard)
+    
+    def _on_tab_changed(self, index: int):
+        """Handle tab changes."""
+        # Refresh settings tab when selected
+        if self.settings_tab and index == self.tab_widget.indexOf(self.settings_tab):
+            self.settings_tab.refresh()
     
     def _on_recording_ready_threadsafe(self, recording):
         """Thread-safe wrapper for recording ready callback."""
