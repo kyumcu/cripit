@@ -11,10 +11,16 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QPushButton, QComboBox, QLabel, QStatusBar,
     QGroupBox, QProgressBar, QSystemTrayIcon, QMenu, QApplication,
-    QMessageBox, QFileDialog
+    QMessageBox, QFileDialog, QTabWidget
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QSize, QObject
 from PyQt6.QtGui import QIcon, QKeySequence, QFont, QAction, QShortcut, QCloseEvent
+
+from utils.audio_converter import (
+    convert_to_wav,
+    get_supported_formats,
+    check_ffmpeg_available,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +91,9 @@ class MainWindow(QMainWindow):
         self.resize(config.ui.window_width, config.ui.window_height)
         self.setWindowTitle(config.ui.window_title)
         
+        # Check FFmpeg availability
+        self._check_ffmpeg()
+        
         logger.info("MainWindow initialized")
     
     def _setup_ui(self):
@@ -97,6 +106,15 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.setSpacing(10)
         layout.setContentsMargins(10, 10, 10, 10)
+        
+        # === Tab Widget ===
+        self.tab_widget = QTabWidget()
+        
+        # === Main Tab ===
+        main_tab = QWidget()
+        main_layout = QVBoxLayout(main_tab)
+        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(0, 0, 0, 0)
         
         # === Text Display ===
         text_group = QGroupBox("Transcription")
@@ -121,7 +139,7 @@ class MainWindow(QMainWindow):
         text_controls.addWidget(self.save_btn)
         
         text_layout.addLayout(text_controls)
-        layout.addWidget(text_group, stretch=1)
+        main_layout.addWidget(text_group, stretch=1)
         
         # === Controls ===
         controls_group = QGroupBox("Controls")
@@ -132,6 +150,12 @@ class MainWindow(QMainWindow):
         self.record_btn.setCheckable(True)
         self.record_btn.setMinimumHeight(40)
         controls_layout.addWidget(self.record_btn)
+        
+        # Process Audio File button
+        self.process_audio_btn = QPushButton("Process Audio File...")
+        self.process_audio_btn.setMinimumHeight(40)
+        self.process_audio_btn.clicked.connect(self._process_audio_file)
+        controls_layout.addWidget(self.process_audio_btn)
         
         # Model selector
         controls_layout.addWidget(QLabel("Model:"))
@@ -149,7 +173,26 @@ class MainWindow(QMainWindow):
         self.settings_btn = QPushButton("Settings...")
         controls_layout.addWidget(self.settings_btn)
         
-        layout.addWidget(controls_group)
+        main_layout.addWidget(controls_group)
+        
+        # Add main tab
+        self.tab_widget.addTab(main_tab, "Recorder")
+        
+        # === Converter Tab ===
+        try:
+            from gui.converter_tab import ConverterTab
+            self.converter_tab = ConverterTab(
+                converted_dir=Path("data") / "converted",
+                pipeline=self.pipeline,
+                on_transcription_ready=self._append_transcription_text,
+                parent=self,
+            )
+            self.tab_widget.addTab(self.converter_tab, "Converter")
+        except Exception as e:
+            logger.error(f"Failed to create converter tab: {e}")
+            self.converter_tab = None
+        
+        layout.addWidget(self.tab_widget)
         
         # === Status Bar ===
         self.status_bar = QStatusBar()
@@ -623,24 +666,185 @@ class MainWindow(QMainWindow):
             if index >= 0:
                 self.model_combo.setCurrentIndex(index)
     
+    def _check_ffmpeg(self):
+        """Check FFmpeg availability on startup."""
+        if not check_ffmpeg_available():
+            logger.warning("FFmpeg not found on startup")
+            # Show warning but don't block - user might install it later
+            QTimer.singleShot(1000, self._show_ffmpeg_warning)
+
+    def _show_ffmpeg_warning(self):
+        """Show FFmpeg warning dialog."""
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Icon.Warning)
+        msg.setWindowTitle("FFmpeg Not Found")
+        msg.setText("Audio conversion requires FFmpeg")
+        msg.setInformativeText(
+            "FFmpeg is required to convert audio files (m4a, mp3, etc.) to WAV format.\n\n"
+            "Install FFmpeg:\n"
+            "  • Ubuntu/Debian: sudo apt-get install ffmpeg\n"
+            "  • macOS: brew install ffmpeg\n"
+            "  • Windows: https://ffmpeg.org/download.html\n\n"
+            "The app will work for recording, but file conversion will not be available."
+        )
+        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg.exec()
+
+    def _process_audio_file(self):
+        """Process an audio file (convert + transcribe)."""
+        # Get supported formats
+        filters = " ".join(f"*{ext}" for ext in get_supported_formats())
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Audio File",
+            "",
+            f"Audio Files ({filters});;All Files (*.*)",
+        )
+
+        if not file_path:
+            return
+
+        input_path = Path(file_path)
+        logger.info(f"Processing audio file: {input_path}")
+
+        # Show progress
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+        self.status_label.setText("Converting audio...")
+
+        # Convert to WAV if needed
+        if input_path.suffix.lower() != ".wav":
+            if not check_ffmpeg_available():
+                self.progress_bar.setVisible(False)
+                self.status_label.setText("Ready")
+                QMessageBox.warning(
+                    self,
+                    "FFmpeg Required",
+                    "FFmpeg is required to convert this file.\n\n"
+                    "Install FFmpeg:\n"
+                    "  Ubuntu/Debian: sudo apt-get install ffmpeg\n"
+                    "  macOS: brew install ffmpeg\n"
+                    "  Windows: https://ffmpeg.org/download.html",
+                )
+                return
+
+            # Convert file
+            converted_dir = Path("data") / "converted"
+            success, wav_path, error_msg = convert_to_wav(input_path, converted_dir)
+
+            if not success:
+                self.progress_bar.setVisible(False)
+                self.status_label.setText("Conversion failed")
+                QMessageBox.critical(
+                    self,
+                    "Conversion Failed",
+                    f"Failed to convert audio file:\n{error_msg}",
+                )
+                return
+
+            if wav_path is None:
+                self.progress_bar.setVisible(False)
+                self.status_label.setText("Conversion failed")
+                QMessageBox.critical(
+                    self,
+                    "Conversion Failed",
+                    f"Failed to convert audio file:\n{error_msg}",
+                )
+                return
+
+            logger.info(f"Converted to: {wav_path}")
+        else:
+            wav_path = input_path
+
+        # Transcribe the file
+        self._transcribe_single_file(wav_path)
+
+    def _transcribe_single_file(self, wav_path: Path):
+        """Transcribe a single WAV file."""
+        if not self.pipeline:
+            QMessageBox.warning(
+                self,
+                "Not Available",
+                "Transcription pipeline is not available",
+            )
+            return
+
+        self.status_label.setText("Transcribing file...")
+
+        try:
+            success, text, error_msg = self.pipeline.transcribe_single_file(
+                wav_path,
+                progress_callback=lambda msg: self.status_label.setText(f"Transcribing: {msg}"),
+            )
+
+            self.progress_bar.setVisible(False)
+
+            if success and text:
+                self._append_transcription_text(text)
+                self.status_label.setText(f"Transcription complete: {len(text)} chars")
+                QMessageBox.information(
+                    self,
+                    "Transcription Complete",
+                    f"Transcribed {len(text)} characters:\n\n{text[:500]}{'...' if len(text) > 500 else ''}",
+                )
+            elif success:
+                self.status_label.setText("Transcription complete (no text)")
+                QMessageBox.information(
+                    self,
+                    "Transcription Complete",
+                    "Transcription completed but no text was produced",
+                )
+            else:
+                self.status_label.setText("Transcription failed")
+                QMessageBox.critical(
+                    self,
+                    "Transcription Failed",
+                    f"Failed to transcribe:\n{error_msg}",
+                )
+
+        except Exception as e:
+            logger.exception("Transcription failed")
+            self.progress_bar.setVisible(False)
+            self.status_label.setText("Transcription error")
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Unexpected error during transcription:\n{type(e).__name__}: {e}",
+            )
+
+    def _append_transcription_text(self, text: str):
+        """Append transcription text to the main display."""
+        if not text.strip():
+            return
+
+        current = self.text_display.toPlainText()
+        if current:
+            self.text_display.append("")
+        self.text_display.append(text)
+
+        # Auto-copy if enabled
+        if self.config.ui.auto_copy:
+            self._copy_to_clipboard()
+
     def closeEvent(self, a0: Optional[QCloseEvent]):
         """Handle window close."""
         logger.info("Closing application...")
-        
+
         # Stop recording
         if self.is_recording:
             self._stop_recording()
-        
+
         # Save config
         self.config.save_config()
-        
+
         # Stop worker
         if self.pipeline:
             try:
                 self.pipeline.stop(timeout=2.0)
             except Exception:
                 pass
-        
+
         logger.info("Application closed")
         if a0 is not None:
             a0.accept()

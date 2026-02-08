@@ -41,6 +41,7 @@ temp/
 
 # User data (don't commit)
 logs/
+data/
 samples/*.wav
 app_config.json
 

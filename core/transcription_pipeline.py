@@ -9,6 +9,7 @@ On failure: moves job into failed/ and keeps it for debugging.
 
 from __future__ import annotations
 
+import logging
 import os
 import queue
 import threading
@@ -22,6 +23,8 @@ from typing import Callable, Optional, Tuple
 import numpy as np
 
 from core.recording_spool import RecordingJob
+
+logger = logging.getLogger(__name__)
 
 
 def _read_wav_int16_mono(path: Path) -> Tuple[np.ndarray, int, int]:
@@ -152,6 +155,87 @@ class TranscriptionPipeline:
                 enqueued += 1
 
         return enqueued
+
+    def transcribe_single_file(
+        self,
+        audio_path: Path,
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> Tuple[bool, Optional[str], str]:
+        """Transcribe a single audio file directly (bypasses spool).
+
+        This is for one-shot transcription of user-selected files (e.g., converted m4a).
+        The file is NOT deleted after transcription.
+
+        Args:
+            audio_path: Path to audio file (WAV format expected)
+            progress_callback: Optional callback(msg) for status updates
+
+        Returns:
+            Tuple of (success: bool, transcription_text: Optional[str], error_message: str)
+        """
+        audio_path = Path(audio_path)
+
+        if not audio_path.exists():
+            return False, None, f"Audio file not found: {audio_path}"
+
+        if progress_callback:
+            try:
+                progress_callback("Reading audio file...")
+            except Exception:
+                pass
+
+        try:
+            audio, sr, _ = _read_wav_int16_mono(audio_path)
+        except Exception as e:
+            error_msg = f"Failed to read audio: {type(e).__name__}: {e}"
+            logger.error(error_msg)
+            return False, None, error_msg
+
+        if progress_callback:
+            try:
+                duration = len(audio) / sr
+                progress_callback(f"Transcribing ({duration:.1f}s)...")
+            except Exception:
+                pass
+
+        try:
+            result = self.transcriber.transcribe(audio)
+            if result is None:
+                return False, None, "Transcription returned None"
+
+            # Extract text from result (handle different result formats)
+            text = ""
+            if isinstance(result, str):
+                text = result
+            elif hasattr(result, "text"):
+                text = result.text
+            elif isinstance(result, dict):
+                text = result.get("text", "")
+            elif hasattr(result, "__iter__"):
+                # Could be a list of segments
+                segments = list(result)
+                if segments and hasattr(segments[0], "text"):
+                    text = " ".join(seg.text for seg in segments)
+                else:
+                    text = str(result)
+            else:
+                text = str(result)
+
+            if progress_callback:
+                try:
+                    progress_callback("Transcription complete")
+                except Exception:
+                    pass
+
+            logger.info(f"Single file transcription complete: {audio_path}")
+            return True, text.strip(), ""
+
+        except Exception as e:
+            error_msg = f"Transcription failed: {type(e).__name__}: {e}"
+            logger.error(error_msg)
+            traceback_str = traceback.format_exc()
+            logger.debug(traceback_str)
+            return False, None, error_msg
 
     def _move_state(self, job: RecordingJob, from_state: str, to_state: str) -> RecordingJob:
         src_root = self.spool_root / from_state

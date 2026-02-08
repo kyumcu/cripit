@@ -13,6 +13,9 @@ webrtcvad-wheels>=2.0.0  # WebRTC VAD
 # torch>=2.0.0          # Uncomment for Silero VAD (more accurate)
 # torchaudio>=2.0.0
 
+# Audio conversion
+pydub>=0.25.1  # For m4a/mp3/ogg conversion (requires FFmpeg)
+
 # Optional utilities
 appdirs>=1.4.4
 pynput>=1.7.6  # For global hotkeys
