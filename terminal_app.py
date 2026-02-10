@@ -86,10 +86,12 @@ class TerminalUI:
         spool,
         pipeline,
         transcriber,
+        engine: str,
         model_name: str,
         recording_device: str,
         output_file: Optional[Path],
         autostart: bool,
+        whisperx_options: Optional[Dict[str, Any]] = None,
     ):
         self.stdscr = stdscr
         self.event_q = event_q
@@ -97,8 +99,10 @@ class TerminalUI:
         self.spool = spool
         self.pipeline = pipeline
         self.transcriber = transcriber
+        self.engine = engine
         self.model_name = model_name
         self.recording_device = recording_device
+        self.whisperx_options = whisperx_options or {}
 
         self.output_file = output_file
         self.saving_enabled = bool(output_file)
@@ -258,13 +262,27 @@ class TerminalUI:
             state = "IDLE"
 
         vad_s = "speech" if self.last_vad_speech else "silence"
+        
+        # Build header with engine info
+        engine_str = f"{self.engine}"
+        if self.engine == "whisperx" and self.whisperx_options:
+            compute = self.whisperx_options.get('compute_type', '')
+            if compute:
+                engine_str += f"({compute})"
+        
         header = (
-            f"Model: {self.model_name} | Device: {device} | State: {state} | "
-            f"VAD: {vad_s} | Backlog: queued={queued} processing={processing} | "
-            f"Perf: last={self.last_segment_s:.1f}s rtf={self.last_rtf:.2f} avg={avg_rtf:.2f}"
+            f"Engine: {engine_str} | Model: {self.model_name} | Device: {device} | State: {state} | "
+            f"VAD: {vad_s}"
         )
         self._safe_addstr(0, 0, header[: w - 1])
-        self._safe_addstr(1, 0, f"Mic: {self.recording_device}"[: w - 1])
+        
+        # Second line with performance and backlog
+        header2 = (
+            f"Mic: {self.recording_device} | "
+            f"Backlog: queued={queued} processing={processing} | "
+            f"Perf: last={self.last_segment_s:.1f}s rtf={self.last_rtf:.2f} avg={avg_rtf:.2f}"
+        )
+        self._safe_addstr(1, 0, header2[: w - 1])
 
         # Transcript area
         top = 2
@@ -321,20 +339,48 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  # Basic usage (starts recording immediately)\n"
+            "  # Basic usage with whisper.cpp (default)\n"
             "  python terminal_app.py --model base.en --threads 4\n\n"
+            "  # Use WhisperX for faster transcription\n"
+            "  python terminal_app.py --engine whisperx --whisperx-model base\n\n"
+            "  # WhisperX with speaker diarization\n"
+            "  python terminal_app.py --engine whisperx --whisperx-diarize --whisperx-hf-token <token>\n\n"
             "  # Start idle (press 'r' to record)\n"
             "  python terminal_app.py --no-autostart\n\n"
             "  # List microphone devices\n"
             "  python terminal_app.py --list-devices\n\n"
-            "  # List models and download one\n"
-            "  python terminal_app.py --list-models\n"
+            "  # List models for specific engine\n"
+            "  python terminal_app.py --list-models --engine whisperx\n\n"
+            "  # Download whisper.cpp model\n"
             "  python terminal_app.py --download base.en\n"
         ),
     )
-    p.add_argument("--model", default="base.en", help="Whisper model name (default: base.en)")
-    p.add_argument("--language", default="en", help="Language code (default: en; use 'auto' for auto-detect)")
-    p.add_argument("--threads", type=int, default=4, help="Inference threads (default: 4)")
+    
+    # ASR Engine selection
+    p.add_argument("--engine", choices=["whispercpp", "whisperx"], default=None,
+                   help="ASR engine to use (default: from config, usually whispercpp)")
+    
+    # whisper.cpp options
+    p.add_argument("--model", default=None, help="Whisper.cpp model name (default: from config)")
+    p.add_argument("--threads", type=int, default=None, help="Inference threads (default: from config)")
+    
+    # WhisperX options
+    p.add_argument("--whisperx-model", default=None, 
+                   choices=["tiny", "base", "small", "medium", "large-v3"],
+                   help="WhisperX model size (default: from config)")
+    p.add_argument("--whisperx-compute-type", default=None,
+                   choices=["int8", "float16", "float32"],
+                   help="WhisperX compute precision (default: from config)")
+    p.add_argument("--whisperx-device", default=None,
+                   choices=["cuda", "cpu"],
+                   help="WhisperX device (default: from config)")
+    p.add_argument("--whisperx-diarize", action="store_true",
+                   help="Enable speaker diarization (requires --whisperx-hf-token)")
+    p.add_argument("--whisperx-hf-token", default=None,
+                   help="HuggingFace token for diarization (get at https://huggingface.co/settings/tokens)")
+    
+    # Common options
+    p.add_argument("--language", default=None, help="Language code (e.g., 'en'; default: from config)")
     p.add_argument("--vad", choices=["webrtc", "energy", "silero"], default="webrtc", help="VAD type")
     p.add_argument("--device-index", type=int, default=None, help="Audio input device index")
     p.add_argument("--gain-db", type=float, default=0.0, help="Input gain in dB")
@@ -343,7 +389,8 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     p.add_argument("--no-autostart", action="store_true", help="Start idle; press r to record")
     p.add_argument("--list-devices", action="store_true", help="List audio input devices and exit")
     p.add_argument("--list-models", action="store_true", help="List available models and exit")
-    p.add_argument("--download", metavar="MODEL", help="Download a model and exit")
+    p.add_argument("--download", metavar="MODEL", help="Download a whisper.cpp model and exit")
+    p.add_argument("--check-engines", action="store_true", help="Check which ASR engines are available and exit")
     p.add_argument("--verbose", action="store_true", help="Verbose logging to output/terminal.log")
     return p.parse_args(argv)
 
@@ -394,14 +441,66 @@ def _describe_recording_device(audio_cls, *, device_index: Optional[int], channe
     return f"#{idx} | ch={channels} | sr={sample_rate} | {name}"
 
 
-def _print_models() -> int:
-    from core.model_manager import get_model_manager
+def _check_engines() -> int:
+    """Check which ASR engines are available."""
+    from core.transcriber_factory import check_engine_availability
+    
+    engines = check_engine_availability()
+    
+    print("\nASR Engine Availability:")
+    print("=" * 40)
+    for engine, available in engines.items():
+        status = "✓ Available" if available else "✗ Not installed"
+        print(f"  {engine:15s} {status}")
+    print("=" * 40)
+    
+    # Return 0 if at least one engine is available
+    return 0 if any(engines.values()) else 1
 
+
+def _print_models(engine: Optional[str] = None) -> int:
+    from core.model_manager import get_model_manager
+    from core.transcriber_factory import check_engine_availability
+    
     mm = get_model_manager()
-    avail = set(mm.get_available_models())
-    for name in mm.list_models():
-        status = "downloaded" if name in avail else "missing"
-        print(f"{name:20s} {status}")
+    engines = check_engine_availability()
+    
+    # If engine not specified, try to determine from config
+    if engine is None:
+        try:
+            from config.settings import config
+            engine = config.model.asr_engine
+        except:
+            engine = "whispercpp"
+    
+    print(f"\nAvailable models for engine: {engine}")
+    print("=" * 60)
+    
+    if engine == "whisperx":
+        # WhisperX models (auto-downloaded from HF)
+        print("Note: WhisperX models are downloaded automatically from HuggingFace\n")
+        whisperx_models = {
+            "tiny": "39M parameters, ~150MB",
+            "base": "74M parameters, ~290MB", 
+            "small": "244M parameters, ~900MB",
+            "medium": "769M parameters, ~3GB",
+            "large-v3": "1.55B parameters, ~6GB",
+        }
+        for name, desc in whisperx_models.items():
+            print(f"  {name:12s} {desc}")
+    else:
+        # whisper.cpp models (need manual download)
+        avail = set(mm.get_available_models())
+        print("Note: Use --download <model> to download whisper.cpp models\n")
+        for name in mm.list_models():
+            status = "✓ downloaded" if name in avail else "  not downloaded"
+            info = mm.get_model_info(name)
+            if info:
+                print(f"  {name:20s} {status:18s} ({info.params}, ~{info.size_mb}MB)")
+            else:
+                print(f"  {name:20s} {status}")
+    
+    print("=" * 60)
     return 0
 
 
@@ -439,8 +538,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Non-curses actions
     if args.list_devices:
         return _print_devices()
+    if args.check_engines:
+        return _check_engines()
     if args.list_models:
-        return _print_models()
+        return _print_models(args.engine)
     if args.download:
         return _download_model(args.download)
 
@@ -453,25 +554,84 @@ def main(argv: Optional[List[str]] = None) -> int:
     from core.recording_spool import RecordingSpool
     from core.transcriber_factory import create_transcriber, check_engine_availability
     from core.transcription_pipeline import TranscriptionPipeline
+    from config.settings import config
 
     # Check engine availability
     engines = check_engine_availability()
     
-    # Prepare model + transcriber
-    mm = get_model_manager()
+    # Determine which engine to use
+    engine = args.engine or config.model.asr_engine
     
-    # Get model path only if using whispercpp
-    transcriber = create_transcriber()
+    # Validate engine availability
+    if engine == "whisperx" and not engines["whisperx"]:
+        print("ERROR: WhisperX engine selected but not installed")
+        print("Install with: pip install whisperx torch torchaudio")
+        return 1
+    if engine == "whispercpp" and not engines["whispercpp"]:
+        print("ERROR: whisper.cpp engine selected but not installed")
+        print("Install with: pip install pywhispercpp")
+        return 1
+    
+    # Update config with CLI arguments
+    if args.engine:
+        config.model.asr_engine = args.engine
+    if args.language:
+        config.model.language = args.language
+    if args.threads:
+        config.model.n_threads = args.threads
+    
+    # Update WhisperX-specific config
+    if engine == "whisperx":
+        if args.whisperx_model:
+            config.model.whisperx_model = args.whisperx_model
+        if args.whisperx_compute_type:
+            config.model.whisperx_compute_type = args.whisperx_compute_type
+        if args.whisperx_device:
+            config.model.whisperx_device = args.whisperx_device
+        if args.whisperx_diarize:
+            config.model.whisperx_diarize = True
+        if args.whisperx_hf_token:
+            config.model.whisperx_hf_token = args.whisperx_hf_token
+        
+        whisperx_options = {
+            'compute_type': config.model.whisperx_compute_type,
+            'diarize': config.model.whisperx_diarize,
+        }
+        
+        # Determine model name to display
+        model_name = args.whisperx_model or config.model.whisperx_model
+    else:
+        # whisper.cpp
+        if args.model:
+            config.model.default_model = args.model
+        model_name = args.model or config.model.default_model
+        whisperx_options = {}
+    
+    # Save config changes
+    config.save_config()
+    
+    # Create transcriber
+    log.info(f"Creating transcriber with engine: {engine}")
+    transcriber = create_transcriber(engine)
     if not transcriber:
         print("ERROR: Failed to create transcriber")
         print("Make sure you have either pywhispercpp or whisperx installed")
         return 1
     
-    # Load model based on engine type
+    # Load model
+    log.info(f"Loading model for {engine}...")
     if not transcriber.load_model():
-        print("Failed to load model")
-        print("See output/terminal.log for details")
+        print(f"Failed to load model for {engine}")
+        if engine == "whisperx":
+            print("\nTroubleshooting:")
+            print("  - Check GPU memory (WhisperX large needs ~6GB VRAM)")
+            print("  - Try a smaller model: --whisperx-model base")
+            print("  - Try CPU mode: --whisperx-device cpu")
+            print("  - Check internet connection (models auto-download from HuggingFace)")
+        print("\nSee output/terminal.log for details")
         return 1
+    
+    log.info(f"Model loaded successfully: {model_name}")
 
     # Durable spool + pipeline
     spool_dir = Path(args.spool_dir)
@@ -556,10 +716,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             spool=spool,
             pipeline=pipeline,
             transcriber=transcriber,
-            model_name=str(args.model),
+            engine=engine,
+            model_name=model_name,
             recording_device=recording_device,
             output_file=out_file,
             autostart=(not bool(args.no_autostart)),
+            whisperx_options=whisperx_options if engine == "whisperx" else None,
         )
         ui.loop()
 
