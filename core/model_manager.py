@@ -156,6 +156,50 @@ class ModelManager:
         ),
     }
     
+    # WhisperX model definitions (HF cache, no local file)
+    WHISPERX_MODELS: Dict[str, ModelInfo] = {
+        "tiny": ModelInfo(
+            name="tiny",
+            file="",  # WhisperX uses HF cache, no local file
+            size_mb=150,
+            params="39M",
+            url="openai/whisper-tiny",
+            description="Smallest model, fastest but lowest quality"
+        ),
+        "base": ModelInfo(
+            name="base",
+            file="",
+            size_mb=290,
+            params="74M",
+            url="openai/whisper-base",
+            description="Base model, good for testing"
+        ),
+        "small": ModelInfo(
+            name="small",
+            file="",
+            size_mb=900,
+            params="244M",
+            url="openai/whisper-small",
+            description="Small model, good balance"
+        ),
+        "medium": ModelInfo(
+            name="medium",
+            file="",
+            size_mb=3000,
+            params="769M",
+            url="openai/whisper-medium",
+            description="Medium model, good quality"
+        ),
+        "large-v3": ModelInfo(
+            name="large-v3",
+            file="",
+            size_mb=6000,
+            params="1.55B",
+            url="openai/whisper-large-v3",
+            description="Large model v3, best quality"
+        ),
+    }
+
     def __init__(self, models_dir: Optional[Path] = None):
         """
         Initialize model manager.
@@ -178,15 +222,49 @@ class ModelManager:
         # Track current downloads
         self._current_downloads: Dict[str, threading.Thread] = {}
         
+        # Track engine type
+        try:
+            from config.settings import config
+            self.engine_type = config.model.asr_engine
+        except:
+            self.engine_type = "whispercpp"
+        
         logger.info("=" * 50)
         logger.info("Initializing ModelManager")
         logger.info("=" * 50)
         logger.info(f"Models directory: {self.models_dir}")
+        logger.info(f"Engine type: {self.engine_type}")
         logger.info(f"Available models: {len(self.MODELS)}")
     
     def list_models(self) -> List[str]:
-        """List all available model names."""
+        """List all available model names for current engine."""
+        if self.engine_type == "whisperx":
+            return list(self.WHISPERX_MODELS.keys())
         return list(self.MODELS.keys())
+
+    def is_whisperx_model_cached(self, model_name: str) -> bool:
+        """Check if WhisperX model is cached locally."""
+        try:
+            from pathlib import Path
+            import os
+            
+            # Check HuggingFace cache
+            cache_dir = Path.home() / ".cache" / "whisper"
+            if not cache_dir.exists():
+                return False
+            
+            # Look for model in cache
+            model_pattern = f"*{model_name}*"
+            matches = list(cache_dir.glob(model_pattern))
+            return len(matches) > 0
+        except Exception:
+            return False
+
+    def get_current_model_info(self, model_name: str) -> Optional[ModelInfo]:
+        """Get model info based on current engine."""
+        if self.engine_type == "whisperx":
+            return self.WHISPERX_MODELS.get(model_name)
+        return self.MODELS.get(model_name)
     
     def get_model_info(self, model_name: str) -> Optional[ModelInfo]:
         """Get information about a model."""

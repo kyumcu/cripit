@@ -451,29 +451,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     from core.audio_capture import AudioCapture
     from core.model_manager import get_model_manager
     from core.recording_spool import RecordingSpool
-    from core.transcriber import Transcriber
+    from core.transcriber_factory import create_transcriber, check_engine_availability
     from core.transcription_pipeline import TranscriptionPipeline
 
+    # Check engine availability
+    engines = check_engine_availability()
+    
     # Prepare model + transcriber
     mm = get_model_manager()
-    model_path = mm.get_model_path(args.model)
-    if not model_path:
-        print(f"Model not downloaded: {args.model}")
-        print("Download it with:")
-        print(f"  python terminal_app.py --download {args.model}")
+    
+    # Get model path only if using whispercpp
+    transcriber = create_transcriber()
+    if not transcriber:
+        print("ERROR: Failed to create transcriber")
+        print("Make sure you have either pywhispercpp or whisperx installed")
         return 1
-
-    language = None if str(args.language).strip().lower() in ("auto", "none", "") else str(args.language).strip()
-
-    transcriber = Transcriber(
-        model_name=str(args.model),
-        language=language,
-        n_threads=int(args.threads),
-        translate=False,
-        use_cuda=False,
-    )
-    if not transcriber.load_model(str(model_path)):
-        print(f"Failed to load model: {args.model}")
+    
+    # Load model based on engine type
+    if not transcriber.load_model():
+        print("Failed to load model")
         print("See output/terminal.log for details")
         return 1
 

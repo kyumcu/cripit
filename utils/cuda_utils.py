@@ -601,6 +601,97 @@ def quick_cuda_check() -> bool:
     return is_valid
 
 
+def get_gpu_memory_info() -> Optional[Dict[str, int]]:
+    """
+    Get GPU memory information.
+    
+    Returns:
+        Dict with 'free_mb', 'total_mb', 'used_mb' or None if CUDA unavailable
+    """
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return None
+        
+        torch.cuda.synchronize()
+        free_memory = torch.cuda.mem_get_info()[0]
+        total_memory = torch.cuda.mem_get_info()[1]
+        
+        return {
+            'free_mb': free_memory // (1024 * 1024),
+            'total_mb': total_memory // (1024 * 1024),
+            'used_mb': (total_memory - free_memory) // (1024 * 1024)
+        }
+    except Exception as e:
+        logger.debug(f"Could not get GPU memory info: {e}")
+        return None
+
+
+def check_whisperx_compatibility() -> tuple:
+    """
+    Check if system can run WhisperX comfortably.
+    
+    Returns:
+        Tuple of (compatible: bool, warning: str, recommendation: str)
+    """
+    warnings = []
+    
+    # Check GPU memory
+    gpu_info = get_gpu_memory_info()
+    if gpu_info:
+        if gpu_info['free_mb'] < 4096:  # Less than 4GB free
+            warnings.append(f"Low GPU memory: {gpu_info['free_mb']}MB free. "
+                          f"WhisperX large model requires ~4GB VRAM.")
+    else:
+        warnings.append("No CUDA GPU detected. WhisperX will run on CPU (slower).")
+    
+    # Check system RAM (approximate)
+    try:
+        import psutil
+        ram_gb = psutil.virtual_memory().total / (1024**3)
+        if ram_gb < 8:
+            warnings.append(f"Low system RAM: {ram_gb:.1f}GB. Recommended: 16GB+ for WhisperX.")
+    except ImportError:
+        pass
+    
+    if warnings:
+        return (
+            False,
+            "\n".join(warnings),
+            "Consider using whisper.cpp for lower resource usage, or use a smaller model like 'base' or 'tiny'."
+        )
+    
+    return (True, "", "")
+
+
+def estimate_whisperx_memory(model_name: str, compute_type: str) -> int:
+    """
+    Estimate VRAM requirement for WhisperX model.
+    
+    Returns:
+        Estimated VRAM in MB
+    """
+    # Rough estimates based on model size
+    base_memory = {
+        "tiny": 1000,
+        "base": 1500,
+        "small": 2500,
+        "medium": 4000,
+        "large-v3": 6000
+    }
+    
+    memory = base_memory.get(model_name, 4000)
+    
+    # Adjust for compute type
+    if compute_type == "int8":
+        memory = int(memory * 0.5)
+    elif compute_type == "float16":
+        memory = int(memory * 0.75)
+    # float32 uses full memory
+    
+    return memory
+
+
 if __name__ == "__main__":
     # Standalone test
     logging.basicConfig(

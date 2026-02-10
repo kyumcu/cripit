@@ -215,13 +215,18 @@ def check_dependencies():
     else:
         logger.info("✓ WebRTC VAD available")
     
-    # Check transcriber
-    from core.transcriber import PYWHISPERCPP_AVAILABLE
-    if not PYWHISPERCPP_AVAILABLE:
-        missing.append("pywhispercpp (pip install pywhispercpp)")
-        logger.error("✗ pywhispercpp not available")
+    # Check transcriber engines
+    from core.transcriber_factory import check_engine_availability
+    engines = check_engine_availability()
+    
+    if not engines["whispercpp"] and not engines["whisperx"]:
+        missing.append("pywhispercpp or whisperx (pip install pywhispercpp OR pip install whisperx torch torchaudio)")
+        logger.error("✗ No ASR engine available")
     else:
-        logger.info("✓ pywhispercpp available")
+        if engines["whispercpp"]:
+            logger.info("✓ whisper.cpp available")
+        if engines["whisperx"]:
+            logger.info("✓ WhisperX available")
     
     if missing:
         print("\n" + "="*60)
@@ -265,7 +270,7 @@ def main():
     
     # Import GUI dependencies
     try:
-        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtWidgets import QApplication, QMessageBox
     except ImportError:
         logger.error("PyQt6 is required to run the GUI")
         return 1
@@ -283,7 +288,7 @@ def main():
     try:
         from config.settings import config
         from core.audio_capture import AudioCapture
-        from core.transcriber import Transcriber
+        from core.transcriber_factory import create_transcriber, check_engine_availability
         from core.model_manager import get_model_manager
         from gui.main_window import MainWindow
         
@@ -295,6 +300,14 @@ def main():
         if args.language:
             config.model.language = args.language
             logger.info(f"Using language from args: {args.language}")
+        
+        # Check if preferred engine is available
+        engines = check_engine_availability()
+        preferred = config.model.asr_engine
+        if preferred == "whisperx" and not engines["whisperx"]:
+            logger.warning("WhisperX not available, falling back to whisper.cpp")
+            config.model.asr_engine = "whispercpp"
+            config.save_config()
         
         # Initialize components
         logger.info("Initializing components...")
@@ -314,16 +327,16 @@ def main():
         model_manager = get_model_manager()
         logger.info("✓ Model manager initialized")
         
-        # Transcriber
-        transcoder = Transcriber(
-            model_name=config.model.default_model,
-            language=config.model.language,
-            n_threads=config.model.n_threads,
-            translate=config.model.translate,
-            use_cuda=getattr(config.model, "use_cuda", True),
-            cuda_device=getattr(config.model, "cuda_device", 0),
-        )
-        logger.info("✓ Transcriber initialized")
+        # Transcriber (using factory)
+        transcoder = create_transcriber()
+        if not transcoder:
+            QMessageBox.critical(
+                None,
+                "Initialization Error",
+                "Failed to create transcriber. Check that the selected ASR engine is installed."
+            )
+            return 1
+        logger.info(f"✓ Transcriber initialized ({config.model.asr_engine})")
         
         # Create main window
         window = MainWindow(config, audio, transcoder, model_manager)

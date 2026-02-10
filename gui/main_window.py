@@ -212,12 +212,18 @@ class MainWindow(QMainWindow):
         # Status labels
         self.status_label = QLabel("Ready")
         self.vad_label = QLabel("VAD: Idle")
+        
+        # Engine indicator
+        engine = getattr(self.config.model, "asr_engine", "whispercpp")
+        self.engine_label = QLabel(f"Engine: {engine}")
+        
         self.model_label = QLabel(f"Model: {self.config.model.default_model}")
         self.device_label = QLabel("Device: CPU")
         self.queue_label = QLabel("Queue: 0")
         
         self.status_bar.addWidget(self.status_label, stretch=1)
         self.status_bar.addWidget(self.vad_label)
+        self.status_bar.addWidget(self.engine_label)
         self.status_bar.addWidget(self.model_label)
         self.status_bar.addWidget(self.device_label)
         self.status_bar.addWidget(self.queue_label)
@@ -529,7 +535,19 @@ class MainWindow(QMainWindow):
     def _on_model_loaded(self):
         """Handle model loaded."""
         logger.info("Model loaded")
-        self.model_label.setText(f"Model: {self.transcriber.model_name}")
+        
+        # Update engine label
+        engine = getattr(self.config.model, "asr_engine", "whispercpp")
+        self.engine_label.setText(f"Engine: {engine}")
+        
+        # Update model label with engine-specific model name
+        if engine == "whisperx":
+            model_name = getattr(self.config.model, "whisperx_model", "large-v3")
+        else:
+            model_name = self.transcriber.model_name
+        
+        self.model_label.setText(f"Model: {model_name}")
+        
         try:
             self.device_label.setText(f"Device: {self.transcriber.get_device_name()}")
         except Exception:

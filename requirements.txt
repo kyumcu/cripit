@@ -1,8 +1,16 @@
 # Core dependencies
 PyQt6>=6.4.0
-pywhispercpp>=1.4.0
 numpy>=1.24.0
 requests>=2.28.0
+
+# ASR Engines (choose one or both)
+pywhispercpp>=1.4.0  # whisper.cpp backend (default)
+whisperx>=3.1.0      # WhisperX backend (requires torch)
+torch>=2.0.0
+torchaudio>=2.0.0
+
+# Optional: For WhisperX speaker diarization
+# pyannote.audio>=3.1.0  # Uncomment and accept HF license to enable
 
 # Audio backends (at least one required)
 sounddevice>=0.4.6  # Alternative to PyAudio

@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QListWidget, QListWidgetItem, QMessageBox,
     QGroupBox, QProgressBar, QSplitter, QTextEdit,
-    QComboBox, QSlider, QSpinBox, QCheckBox, QTabWidget
+    QComboBox, QSlider, QSpinBox, QCheckBox, QTabWidget, QLineEdit
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread
 from PyQt6.QtGui import QFont
@@ -214,6 +214,95 @@ class SettingsTab(QWidget):
         cuda_layout.addWidget(cuda_group)
         cuda_layout.addStretch()
         self.inner_tabs.addTab(cuda_tab, "GPU")
+        
+        # === ASR Engine Tab ===
+        engine_tab = QWidget()
+        engine_layout = QVBoxLayout(engine_tab)
+        engine_layout.setSpacing(10)
+        
+        # Engine Selection Section
+        engine_group = QGroupBox("ASR Engine")
+        engine_inner_layout = QVBoxLayout(engine_group)
+        
+        # Engine combo
+        engine_combo_layout = QHBoxLayout()
+        engine_combo_layout.addWidget(QLabel("Engine:"))
+        self.engine_combo = QComboBox()
+        self.engine_combo.addItem("whisper.cpp (Default)", "whispercpp")
+        self.engine_combo.addItem("⚡ WhisperX (Fast)", "whisperx")
+        self.engine_combo.currentIndexChanged.connect(self.on_engine_changed)
+        engine_combo_layout.addWidget(self.engine_combo, stretch=1)
+        engine_inner_layout.addLayout(engine_combo_layout)
+        
+        # Memory Warning Label
+        self.memory_warning_label = QLabel()
+        self.memory_warning_label.setStyleSheet("color: orange;")
+        self.memory_warning_label.setWordWrap(True)
+        self.memory_warning_label.hide()
+        engine_inner_layout.addWidget(self.memory_warning_label)
+        
+        engine_layout.addWidget(engine_group)
+        
+        # WhisperX Options Section (initially hidden)
+        self.whisperx_group = QGroupBox("WhisperX Options")
+        whisperx_layout = QVBoxLayout(self.whisperx_group)
+        
+        # Model selector
+        model_layout = QHBoxLayout()
+        model_layout.addWidget(QLabel("Model:"))
+        self.whisperx_model_combo = QComboBox()
+        self.whisperx_model_combo.addItems(["tiny", "base", "small", "medium", "large-v3"])
+        model_layout.addWidget(self.whisperx_model_combo, stretch=1)
+        whisperx_layout.addLayout(model_layout)
+        
+        # Compute type
+        compute_layout = QHBoxLayout()
+        compute_layout.addWidget(QLabel("Compute Type:"))
+        self.compute_type_combo = QComboBox()
+        self.compute_type_combo.addItem("int8 (Fastest, lower quality)", "int8")
+        self.compute_type_combo.addItem("float16 (Balanced)", "float16")
+        self.compute_type_combo.addItem("float32 (Best quality, slowest)", "float32")
+        compute_layout.addWidget(self.compute_type_combo, stretch=1)
+        whisperx_layout.addLayout(compute_layout)
+        
+        # Diarization checkbox (unchecked by default)
+        self.diarization_checkbox = QCheckBox("Enable speaker diarization (requires HuggingFace token)")
+        self.diarization_checkbox.setChecked(False)
+        self.diarization_checkbox.stateChanged.connect(self.on_diarization_changed)
+        whisperx_layout.addWidget(self.diarization_checkbox)
+        
+        # HF Token (hidden unless diarization enabled)
+        hf_layout = QHBoxLayout()
+        self.hf_token_label = QLabel("HF Token:")
+        self.hf_token_label.hide()
+        hf_layout.addWidget(self.hf_token_label)
+        
+        self.hf_token_input = QLineEdit()
+        self.hf_token_input.setPlaceholderText("Enter HuggingFace token (optional)")
+        self.hf_token_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.hf_token_input.hide()
+        hf_layout.addWidget(self.hf_token_input, stretch=1)
+        whisperx_layout.addLayout(hf_layout)
+        
+        # Help link for HF token
+        self.hf_help_label = QLabel('<a href="https://huggingface.co/settings/tokens">Get token here</a>')
+        self.hf_help_label.setOpenExternalLinks(True)
+        self.hf_help_label.hide()
+        whisperx_layout.addWidget(self.hf_help_label)
+        
+        # Apply button
+        apply_engine_layout = QHBoxLayout()
+        apply_engine_layout.addStretch()
+        self.apply_engine_btn = QPushButton("Apply Engine Settings")
+        self.apply_engine_btn.clicked.connect(self._apply_engine_settings)
+        apply_engine_layout.addWidget(self.apply_engine_btn)
+        whisperx_layout.addLayout(apply_engine_layout)
+        
+        engine_layout.addWidget(self.whisperx_group)
+        self.whisperx_group.hide()  # Hidden by default
+        
+        engine_layout.addStretch()
+        self.inner_tabs.addTab(engine_tab, "Engine")
         
         # === Model Management Tab ===
         models_tab = QWidget()
@@ -607,3 +696,105 @@ class SettingsTab(QWidget):
         self._update_disk_usage()
         self._refresh_cuda_status()
         self._populate_microphone_list()
+        self._refresh_engine_settings()
+
+    def _refresh_engine_settings(self):
+        """Refresh engine settings from config."""
+        # Set engine combo
+        engine = getattr(self.config.model, "asr_engine", "whispercpp")
+        for i in range(self.engine_combo.count()):
+            if self.engine_combo.itemData(i) == engine:
+                self.engine_combo.setCurrentIndex(i)
+                break
+        
+        # Set WhisperX options
+        self.whisperx_model_combo.setCurrentText(getattr(self.config.model, "whisperx_model", "large-v3"))
+        
+        compute_type = getattr(self.config.model, "whisperx_compute_type", "int8")
+        for i in range(self.compute_type_combo.count()):
+            if self.compute_type_combo.itemData(i) == compute_type:
+                self.compute_type_combo.setCurrentIndex(i)
+                break
+        
+        self.diarization_checkbox.setChecked(getattr(self.config.model, "whisperx_diarize", False))
+        
+        hf_token = getattr(self.config.model, "whisperx_hf_token", "")
+        if hf_token:
+            self.hf_token_input.setText(hf_token)
+        
+        # Update visibility
+        self.on_engine_changed(self.engine_combo.currentIndex())
+
+    def on_engine_changed(self, index):
+        """Show/hide WhisperX options based on engine selection."""
+        engine = self.engine_combo.currentData()
+        
+        if engine == "whisperx":
+            self.whisperx_group.show()
+            self.check_memory_compatibility()
+        else:
+            self.whisperx_group.hide()
+            self.memory_warning_label.hide()
+
+    def on_diarization_changed(self, state):
+        """Show/hide HF token input based on diarization checkbox."""
+        from PyQt6.QtCore import Qt
+        enabled = state == Qt.CheckState.Checked
+        self.hf_token_label.setVisible(enabled)
+        self.hf_token_input.setVisible(enabled)
+        self.hf_help_label.setVisible(enabled)
+
+    def check_memory_compatibility(self):
+        """Check system compatibility and show warning if needed."""
+        from utils.cuda_utils import check_whisperx_compatibility
+        
+        compatible, warning, recommendation = check_whisperx_compatibility()
+        
+        if not compatible:
+            self.memory_warning_label.setText(
+                f"⚠️ {warning}\n\nRecommendation: {recommendation}"
+            )
+            self.memory_warning_label.show()
+        else:
+            self.memory_warning_label.hide()
+
+    def _apply_engine_settings(self):
+        """Save engine settings to config."""
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+            
+            engine = self.engine_combo.currentData()
+            old_engine = getattr(self.config.model, "asr_engine", "whispercpp")
+            
+            # Save settings
+            self.config.model.asr_engine = engine
+            self.config.model.whisperx_model = self.whisperx_model_combo.currentText()
+            self.config.model.whisperx_compute_type = self.compute_type_combo.currentData()
+            self.config.model.whisperx_diarize = self.diarization_checkbox.isChecked()
+            
+            # Only save token if diarization enabled
+            if self.diarization_checkbox.isChecked():
+                self.config.model.whisperx_hf_token = self.hf_token_input.text()
+            else:
+                self.config.model.whisperx_hf_token = None
+            
+            if self.config.save_config():
+                self.config_changed.emit()
+                
+                # Show restart warning if engine changed
+                if engine != old_engine:
+                    QMessageBox.information(
+                        self,
+                        "Engine Changed",
+                        f"ASR engine changed from {old_engine} to {engine}.\n\n"
+                        "Please restart the application for the change to take full effect."
+                    )
+                else:
+                    QMessageBox.information(self, "Success", "Engine settings applied successfully")
+            else:
+                QMessageBox.warning(self, "Warning", "Failed to save engine settings.")
+                
+        except Exception as e:
+            logger.error(f"Error applying engine settings: {e}")
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Error", f"Failed to apply engine settings: {str(e)}")

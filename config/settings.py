@@ -74,6 +74,14 @@ class ModelSettings:
     cuda_fallback_to_cpu: bool = True  # Automatically fall back to CPU if CUDA fails
     cuda_warn_on_fallback: bool = True  # Show warning when falling back to CPU
     
+    # WhisperX settings
+    asr_engine: str = "whispercpp"  # Options: "whispercpp", "whisperx"
+    whisperx_model: str = "large-v3"  # Options: tiny, base, small, medium, large-v3
+    whisperx_compute_type: str = "int8"  # Options: int8, float16, float32
+    whisperx_diarize: bool = False  # Disabled by default (opt-in)
+    whisperx_hf_token: Optional[str] = None  # Required only if diarization enabled
+    whisperx_device: str = "cuda"  # Options: "cuda", "cpu"
+    
     def __post_init__(self):
         logger.info(f"ModelSettings initialized with default model: {self.default_model}")
         logger.info(f"CUDA settings: use_cuda={self.use_cuda}, device={self.cuda_device}, fallback={self.cuda_fallback_to_cpu}")
@@ -231,6 +239,12 @@ class AppConfig:
                     'cuda_device': self.model.cuda_device,
                     'cuda_fallback_to_cpu': self.model.cuda_fallback_to_cpu,
                     'cuda_warn_on_fallback': self.model.cuda_warn_on_fallback,
+                    'asr_engine': self.model.asr_engine,
+                    'whisperx_model': self.model.whisperx_model,
+                    'whisperx_compute_type': self.model.whisperx_compute_type,
+                    'whisperx_diarize': self.model.whisperx_diarize,
+                    'whisperx_hf_token': self.model.whisperx_hf_token,
+                    'whisperx_device': self.model.whisperx_device,
                 },
                 'ui': {
                     'auto_copy': self.ui.auto_copy,
