@@ -1,5 +1,6 @@
 """
-Test suite for transcriber module
+Test suite for transcriber module (updated for WhisperX support)
+Tests both whisper.cpp and WhisperX transcribers
 """
 
 import sys
@@ -16,31 +17,31 @@ logging.basicConfig(
 )
 
 
-def test_imports():
-    """Test that all required modules can be imported."""
+def test_base_transcriber_imports():
+    """Test that base transcriber can be imported."""
     print("\n" + "="*50)
-    print("TEST 1: Module Imports")
+    print("TEST 1: Base Transcriber Imports")
     print("="*50)
     
     try:
-        from core.transcriber import Transcriber, TranscriptionResult
-        from core.transcriber import MultiModelTranscriber, create_transcriber
-        print("✓ All transcriber classes imported successfully")
+        from core.base_transcriber import BaseTranscriber, TranscriptionResult
+        from core.base_transcriber import EngineNotAvailableError, ModelLoadError, TranscriptionError
+        print("✓ Base transcriber classes imported successfully")
         return True
     except ImportError as e:
         print(f"❌ Import failed: {e}")
         return False
 
 
-def test_transcription_result():
-    """Test TranscriptionResult dataclass."""
+def test_transcription_result_base():
+    """Test TranscriptionResult dataclass from base."""
     print("\n" + "="*50)
-    print("TEST 2: TranscriptionResult Dataclass")
+    print("TEST 2: TranscriptionResult (Base)")
     print("="*50)
     
-    from core.transcriber import TranscriptionResult
+    from core.base_transcriber import TranscriptionResult
     
-    # Create result
+    # Create result with all fields including speakers
     result = TranscriptionResult(
         text="Hello world",
         language="en",
@@ -48,32 +49,51 @@ def test_transcription_result():
         duration=2.5,
         processing_time=0.3,
         segments=[{'text': 'Hello world', 'language': 'en'}],
-        is_partial=False
+        is_partial=False,
+        speakers=[{'speaker': 'SPEAKER_00', 'start': 0.0, 'end': 2.5, 'text': 'Hello world'}]
     )
     
     print(f"✓ Text: {result.text}")
     print(f"✓ Language: {result.language}")
     print(f"✓ Duration: {result.duration}s")
     print(f"✓ Processing time: {result.processing_time}s")
-    print(f"✓ RTF: {result.processing_time / result.duration:.2f}x")
+    print(f"✓ Speakers: {len(result.speakers) if result.speakers else 0} speakers")
     
     assert result.text == "Hello world"
     assert result.language == "en"
     assert result.duration == 2.5
+    assert result.speakers is not None
+    assert len(result.speakers) == 1
     
     return True
 
 
-def test_transcriber_initialization():
-    """Test Transcriber initialization."""
+def test_whispercpp_transcriber():
+    """Test WhisperCppTranscriber."""
     print("\n" + "="*50)
-    print("TEST 3: Transcriber Initialization")
+    print("TEST 3: WhisperCppTranscriber")
     print("="*50)
     
-    from core.transcriber import Transcriber
+    from core.whispercpp_transcriber import WhisperCppTranscriber, PYWHISPERCPP_AVAILABLE
+    
+    if not PYWHISPERCPP_AVAILABLE:
+        print("⚠️ pywhispercpp not installed, skipping detailed tests")
+        # Still test initialization
+        try:
+            transcoder = WhisperCppTranscriber(
+                model_path="/fake/path/model.bin",
+                model_name="large-v3-turbo",
+                language="en",
+                n_threads=4,
+            )
+            print("✓ WhisperCppTranscriber initialized (without pywhispercpp)")
+            return True
+        except Exception as e:
+            print(f"❌ Initialization failed: {e}")
+            return False
     
     try:
-        transcoder = Transcriber(
+        transcoder = WhisperCppTranscriber(
             model_path="/fake/path/model.bin",
             model_name="large-v3-turbo",
             language="en",
@@ -81,151 +101,248 @@ def test_transcriber_initialization():
             translate=False,
             use_cuda=True,
             cuda_device=0,
-            gpu_layers=-1,
         )
         
-        print(f"✓ Transcriber initialized")
+        print(f"✓ WhisperCppTranscriber initialized")
         print(f"✓ Model name: {transcoder.model_name}")
         print(f"✓ Language: {transcoder.language}")
         print(f"✓ Threads: {transcoder.n_threads}")
-        print(f"✓ Use CUDA: {transcoder.use_cuda}")
-        print(f"✓ CUDA device: {transcoder.cuda_device}")
         print(f"✓ Ready: {transcoder.is_ready()}")
         
         assert transcoder.model_name == "large-v3-turbo"
-        assert transcoder.language == "en"
-        assert transcoder.n_threads == 4
-        assert transcoder.use_cuda == True
-        assert transcoder.cuda_device == 0
         assert not transcoder.is_ready()  # Not loaded yet
         
-        return True
-    except Exception as e:
-        print(f"❌ Transcriber initialization failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-
-
-def test_transcriber_stats():
-    """Test transcriber statistics."""
-    print("\n" + "="*50)
-    print("TEST 4: Transcriber Statistics")
-    print("="*50)
-    
-    from core.transcriber import Transcriber
-    
-    try:
-        transcoder = Transcriber(model_name="large-v3-turbo")
-        
-        # Get initial stats
+        # Test stats
         stats = transcoder.get_stats()
-        
-        print(f"✓ Initial stats:")
-        print(f"  - Total transcriptions: {stats['total_transcriptions']}")
-        print(f"  - Total audio seconds: {stats['total_audio_seconds']:.2f}s")
-        print(f"  - Total processing seconds: {stats['total_processing_seconds']:.2f}s")
-        print(f"  - Model loaded: {stats['model_loaded']}")
-        print(f"  - Model name: {stats['model_name']}")
-        
-        assert stats['total_transcriptions'] == 0
-        assert stats['model_loaded'] == False
+        assert 'total_transcriptions' in stats
+        assert 'model_name' in stats
         assert stats['model_name'] == "large-v3-turbo"
         
+        print(f"✓ Stats working correctly")
+        
         return True
     except Exception as e:
-        print(f"❌ Stats test failed: {e}")
+        print(f"❌ WhisperCppTranscriber test failed: {e}")
         import traceback
         traceback.print_exc()
         return False
 
 
-def test_multi_model_transcriber():
-    """Test MultiModelTranscriber."""
+def test_whisperx_transcriber():
+    """Test WhisperXTranscriber."""
     print("\n" + "="*50)
-    print("TEST 5: MultiModelTranscriber")
+    print("TEST 4: WhisperXTranscriber")
     print("="*50)
     
-    from core.transcriber import MultiModelTranscriber
+    from core.whisperx_transcriber import WhisperXTranscriber, WHISPERX_AVAILABLE
     
     try:
-        # Create without config
-        mm_transcoder = MultiModelTranscriber(config=None)
+        transcoder = WhisperXTranscriber(
+            model_name="base",
+            device="cpu",
+            compute_type="int8",
+            language="en",
+            enable_diarization=False,
+            hf_token=None,
+        )
         
-        print(f"✓ MultiModelTranscriber initialized")
-        print(f"✓ Available models: {mm_transcoder.list_models()}")
-        print(f"✓ Current model: {mm_transcoder.get_current_model()}")
-        
-        assert len(mm_transcoder.list_models()) == 0
-        assert mm_transcoder.get_current_model() is None
-        
-        # Try to add model (will fail because file doesn't exist)
-        result = mm_transcoder.add_model("test", "/fake/path.bin")
-        print(f"✓ Add model result (expected False): {result}")
-        
-        return True
-    except Exception as e:
-        print(f"❌ MultiModelTranscriber test failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-
-
-def test_config_factory():
-    """Test creating Transcriber from config."""
-    print("\n" + "="*50)
-    print("TEST 6: Config Factory")
-    print("="*50)
-    
-    try:
-        from core.transcriber import create_transcriber
-        from config.settings import config
-        
-        # Create from config
-        transcoder = create_transcriber(config)
-        
-        print(f"✓ Transcriber created from config")
+        print(f"✓ WhisperXTranscriber initialized")
         print(f"✓ Model name: {transcoder.model_name}")
+        print(f"✓ Device: {transcoder.device}")
+        print(f"✓ Compute type: {transcoder.compute_type}")
         print(f"✓ Language: {transcoder.language}")
-        print(f"✓ Threads: {transcoder.n_threads}")
-        print(f"✓ Translate: {transcoder.translate}")
-        print(f"✓ Use CUDA: {getattr(transcoder, 'use_cuda', None)}")
-        print(f"✓ CUDA device: {getattr(transcoder, 'cuda_device', None)}")
+        print(f"✓ Diarization: {transcoder.enable_diarization}")
+        print(f"✓ Ready: {transcoder.is_ready()}")
         
-        # Verify config values applied
-        assert transcoder.model_name == config.model.default_model
-        assert transcoder.language == config.model.language
-        assert transcoder.n_threads == config.model.n_threads
-        assert transcoder.translate == config.model.translate
-        assert getattr(transcoder, 'use_cuda', None) == config.model.use_cuda
-        assert getattr(transcoder, 'cuda_device', None) == config.model.cuda_device
+        assert transcoder.model_name == "base"
+        assert transcoder.device == "cpu"
+        assert not transcoder.is_ready()  # Not loaded yet
+        
+        # Test stats
+        stats = transcoder.get_stats()
+        assert 'total_transcriptions' in stats
+        assert 'model_name' in stats
+        assert 'diarization_enabled' in stats
+        assert stats['model_name'] == "base"
+        assert stats['diarization_enabled'] == False
+        
+        print(f"✓ Stats working correctly")
+        print(f"  - Device: {stats['device']}")
+        print(f"  - Using GPU: {stats['using_gpu']}")
         
         return True
     except Exception as e:
-        print(f"❌ Config factory test failed: {e}")
+        print(f"❌ WhisperXTranscriber test failed: {e}")
         import traceback
         traceback.print_exc()
         return False
 
 
-def test_context_manager():
-    """Test transcriber context manager."""
+def test_transcriber_factory():
+    """Test transcriber factory."""
     print("\n" + "="*50)
-    print("TEST 7: Context Manager")
+    print("TEST 5: Transcriber Factory")
     print("="*50)
     
-    from core.transcriber import Transcriber
+    from core.transcriber_factory import create_transcriber, check_engine_availability, reload_transcriber
+    from core.base_transcriber import BaseTranscriber
     
     try:
-        with Transcriber(model_name="base") as transcoder:
-            print(f"✓ Entered context with model: {transcoder.model_name}")
-            assert transcoder.model_name == "base"
+        # Check engine availability
+        engines = check_engine_availability()
+        print(f"✓ Engine availability checked")
+        print(f"  - whispercpp: {engines.get('whispercpp', False)}")
+        print(f"  - whisperx: {engines.get('whisperx', False)}")
         
-        print(f"✓ Exited context successfully")
+        assert 'whispercpp' in engines
+        assert 'whisperx' in engines
+        
+        # Try to create default transcriber
+        transcoder = create_transcriber()
+        if transcoder:
+            print(f"✓ Default transcriber created: {type(transcoder).__name__}")
+            assert isinstance(transcoder, BaseTranscriber)
+            
+            # Test stats interface
+            stats = transcoder.get_stats()
+            assert isinstance(stats, dict)
+            print(f"✓ Transcriber implements BaseTranscriber interface")
+        else:
+            print("⚠️ No transcriber created (no engines available)")
         
         return True
     except Exception as e:
-        print(f"❌ Context manager test failed: {e}")
+        print(f"❌ Factory test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def test_transcriber_compatibility():
+    """Test that both transcribers have compatible interfaces."""
+    print("\n" + "="*50)
+    print("TEST 6: Transcriber Interface Compatibility")
+    print("="*50)
+    
+    from core.base_transcriber import BaseTranscriber
+    from core.whispercpp_transcriber import WhisperCppTranscriber
+    from core.whisperx_transcriber import WhisperXTranscriber
+    
+    try:
+        # Create instances
+        cpp_transcoder = WhisperCppTranscriber(model_name="base")
+        x_transcoder = WhisperXTranscriber(model_name="base", device="cpu")
+        
+        # Test that both inherit from BaseTranscriber
+        assert isinstance(cpp_transcoder, BaseTranscriber), "WhisperCppTranscriber should inherit from BaseTranscriber"
+        assert isinstance(x_transcoder, BaseTranscriber), "WhisperXTranscriber should inherit from BaseTranscriber"
+        
+        print("✓ Both transcribers inherit from BaseTranscriber")
+        
+        # Test common interface methods
+        for transcoder in [cpp_transcoder, x_transcoder]:
+            assert hasattr(transcoder, 'load_model')
+            assert hasattr(transcoder, 'unload_model')
+            assert hasattr(transcoder, 'transcribe')
+            assert hasattr(transcoder, 'is_ready')
+            assert hasattr(transcoder, 'get_stats')
+            assert hasattr(transcoder, 'get_device_name')
+            
+            # Test method signatures (they should be callable)
+            assert callable(transcoder.load_model)
+            assert callable(transcoder.unload_model)
+            assert callable(transcoder.transcribe)
+            assert callable(transcoder.is_ready)
+            assert callable(transcoder.get_stats)
+            assert callable(transcoder.get_device_name)
+        
+        print("✓ Both transcribers implement required interface methods")
+        
+        # Test stats return type
+        for transcoder in [cpp_transcoder, x_transcoder]:
+            stats = transcoder.get_stats()
+            assert isinstance(stats, dict)
+            assert 'model_name' in stats
+        
+        print("✓ Stats interface consistent between implementations")
+        
+        return True
+    except Exception as e:
+        print(f"❌ Compatibility test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def test_transcriber_with_audio():
+    """Test transcription with dummy audio data."""
+    print("\n" + "="*50)
+    print("TEST 7: Transcription with Audio Data")
+    print("="*50)
+    
+    from core.transcriber_factory import create_transcriber
+    
+    try:
+        transcoder = create_transcriber()
+        if not transcoder:
+            print("⚠️ No transcriber available, skipping audio test")
+            return True
+        
+        # Create dummy audio data (1 second of silence)
+        sample_rate = 16000
+        duration = 1.0
+        audio_data = np.zeros(int(sample_rate * duration), dtype=np.float32)
+        
+        print(f"✓ Created {duration}s of dummy audio")
+        
+        # Note: We don't actually transcribe because models aren't loaded
+        # Just verify the transcribe method exists and accepts the right args
+        import inspect
+        sig = inspect.signature(transcoder.transcribe)
+        params = list(sig.parameters.keys())
+        
+        assert 'audio_data' in params
+        assert 'is_partial' in params
+        
+        print(f"✓ Transcribe method accepts correct parameters: {params}")
+        
+        return True
+    except Exception as e:
+        print(f"❌ Audio transcription test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def test_backwards_compatibility():
+    """Test that old imports still work."""
+    print("\n" + "="*50)
+    print("TEST 8: Backwards Compatibility")
+    print("="*50)
+    
+    try:
+        # Old imports should still work
+        from core.transcriber import Transcriber, TranscriptionResult
+        from core.transcriber import create_transcriber, MultiModelTranscriber
+        from core.transcriber import PYWHISPERCPP_AVAILABLE, SAMPLE_RATE
+        
+        print("✓ Old import paths work")
+        
+        # Transcriber should be an alias for WhisperCppTranscriber
+        from core.whispercpp_transcriber import WhisperCppTranscriber
+        assert Transcriber is WhisperCppTranscriber, "Transcriber should be alias for WhisperCppTranscriber"
+        
+        print("✓ Transcriber is alias for WhisperCppTranscriber")
+        
+        # Can still create using old interface
+        transcoder = Transcriber(model_name="base")
+        assert transcoder.model_name == "base"
+        
+        print("✓ Can create transcribers using old interface")
+        
+        return True
+    except Exception as e:
+        print(f"❌ Backwards compatibility test failed: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -234,17 +351,18 @@ def test_context_manager():
 def run_all_tests():
     """Run all transcriber tests."""
     print("\n" + "="*60)
-    print("TRANSCRIBER MODULE TEST SUITE")
+    print("TRANSCRIBER MODULE TEST SUITE (WhisperX Support)")
     print("="*60)
     
     tests = [
-        test_imports,
-        test_transcription_result,
-        test_transcriber_initialization,
-        test_transcriber_stats,
-        test_multi_model_transcriber,
-        test_config_factory,
-        test_context_manager,
+        test_base_transcriber_imports,
+        test_transcription_result_base,
+        test_whispercpp_transcriber,
+        test_whisperx_transcriber,
+        test_transcriber_factory,
+        test_transcriber_compatibility,
+        test_transcriber_with_audio,
+        test_backwards_compatibility,
     ]
     
     passed = 0

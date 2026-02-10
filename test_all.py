@@ -44,7 +44,7 @@ def run_tests():
         results['audio'] = 'ERROR'
     
     # Test 3: Transcriber
-    print("\n[3/6] Running Transcriber Tests...")
+    print("\n[3/8] Running Transcriber Tests...")
     try:
         import test_transcriber
         success = test_transcriber.run_all_tests()
@@ -53,8 +53,18 @@ def run_tests():
         print(f"  Error: {e}")
         results['transcriber'] = 'ERROR'
     
-    # Test 4: Model Manager
-    print("\n[4/6] Running Model Manager Tests...")
+    # Test 4: Transcriber Factory
+    print("\n[4/8] Running Transcriber Factory Tests...")
+    try:
+        import test_transcriber_factory
+        success = test_transcriber_factory.run_all_tests()
+        results['transcriber_factory'] = 'PASS' if success else 'FAIL'
+    except Exception as e:
+        print(f"  Error: {e}")
+        results['transcriber_factory'] = 'ERROR'
+    
+    # Test 5: Model Manager
+    print("\n[5/8] Running Model Manager Tests...")
     try:
         import test_model_manager
         success = test_model_manager.run_all_tests()
@@ -63,8 +73,8 @@ def run_tests():
         print(f"  Error: {e}")
         results['model_manager'] = 'ERROR'
     
-    # Test 5: Integration
-    print("\n[5/6] Running Integration Tests...")
+    # Test 6: Integration
+    print("\n[6/8] Running Integration Tests...")
     try:
         import test_integration
         success = test_integration.run_all_tests()
@@ -73,8 +83,8 @@ def run_tests():
         print(f"  Error: {e}")
         results['integration'] = 'ERROR'
 
-    # Test 6: CUDA Utilities
-    print("\n[6/6] Running CUDA Utils Tests...")
+    # Test 7: CUDA Utilities
+    print("\n[7/8] Running CUDA Utils Tests...")
     try:
         import test_cuda_utils
         success = test_cuda_utils.run_all_tests()
@@ -82,6 +92,22 @@ def run_tests():
     except Exception as e:
         print(f"  Error: {e}")
         results['cuda_utils'] = 'ERROR'
+    
+    # Test 8: Base Transcriber
+    print("\n[8/8] Running Base Transcriber Tests...")
+    try:
+        from core.base_transcriber import BaseTranscriber, TranscriptionResult
+        from core.whispercpp_transcriber import WhisperCppTranscriber
+        from core.whisperx_transcriber import WhisperXTranscriber
+        
+        # Quick validation
+        result = TranscriptionResult(text="test", speakers=[])
+        assert result.text == "test"
+        print("  ✓ Base transcriber module working")
+        results['base_transcriber'] = 'PASS'
+    except Exception as e:
+        print(f"  Error: {e}")
+        results['base_transcriber'] = 'ERROR'
     
     # Summary
     print("\n" + "="*70)
@@ -106,13 +132,17 @@ def run_tests():
     
     try:
         from core.audio_capture import SOUNDDEVICE_AVAILABLE, WEBRTC_AVAILABLE
-        from core.transcriber import PYWHISPERCPP_AVAILABLE
+        from core.transcriber_factory import check_engine_availability
+        from core.whisperx_transcriber import WHISPERX_AVAILABLE
+        
+        engines = check_engine_availability()
         
         deps = {
             'PyQt6': True,
             'sounddevice': SOUNDDEVICE_AVAILABLE,
             'WebRTC VAD': WEBRTC_AVAILABLE,
-            'pywhispercpp': PYWHISPERCPP_AVAILABLE,
+            'pywhispercpp': engines.get('whispercpp', False),
+            'whisperx': engines.get('whisperx', False),
         }
         
         for dep, available in deps.items():
