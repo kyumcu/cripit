@@ -85,6 +85,81 @@ class BaseVAD:
         pass
 
 
+class EnergyVAD(BaseVAD):
+    """Energy/RMS-based VAD fallback.
+
+    Pure numpy implementation intended as a safe fallback when WebRTC VAD wheels
+    are not available (common on some ARM setups).
+
+    Uses simple RMS thresholding with hysteresis and hangover frames.
+    """
+
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        aggressiveness: int = 2,
+        *,
+        start_threshold: Optional[float] = None,
+        stop_threshold: Optional[float] = None,
+        hangover_frames: Optional[int] = None,
+    ):
+        super().__init__(sample_rate, aggressiveness)
+
+        # aggressiveness: higher => stricter thresholds (less speech)
+        # RMS is computed on float32 normalized to [-1, 1].
+        start_map = {0: 0.010, 1: 0.015, 2: 0.020, 3: 0.030}
+        stop_map = {0: 0.008, 1: 0.012, 2: 0.016, 3: 0.024}
+        hang_map = {0: 10, 1: 8, 2: 6, 3: 5}
+
+        self.start_threshold = float(start_threshold if start_threshold is not None else start_map.get(aggressiveness, 0.020))
+        self.stop_threshold = float(stop_threshold if stop_threshold is not None else stop_map.get(aggressiveness, 0.016))
+        self.hangover_frames = int(hangover_frames if hangover_frames is not None else hang_map.get(aggressiveness, 6))
+
+        self._in_speech = False
+        self._hang = 0
+        logger.info(
+            "EnergyVAD initialized: start_threshold=%.4f stop_threshold=%.4f hangover_frames=%d",
+            self.start_threshold,
+            self.stop_threshold,
+            self.hangover_frames,
+        )
+
+    def is_speech(self, audio_frame: bytes) -> bool:
+        try:
+            x = np.frombuffer(audio_frame, dtype=np.int16)
+            if x.size == 0:
+                return False
+            xf = x.astype(np.float32) / 32768.0
+            rms = float(np.sqrt(np.mean(xf * xf)))
+
+            if not self._in_speech:
+                if rms >= self.start_threshold:
+                    self._in_speech = True
+                    self._hang = self.hangover_frames
+                    return True
+                return False
+
+            # Currently in speech
+            if rms >= self.stop_threshold:
+                self._hang = self.hangover_frames
+                return True
+
+            # Below stop threshold: hangover
+            if self._hang > 0:
+                self._hang -= 1
+                return True
+
+            self._in_speech = False
+            return False
+        except Exception as e:
+            logger.error(f"EnergyVAD error: {e}")
+            return False
+
+    def reset(self):
+        self._in_speech = False
+        self._hang = 0
+
+
 class WebRTCVAD(BaseVAD):
     """WebRTC-based Voice Activity Detection."""
     
@@ -213,12 +288,32 @@ class AudioCapture:
         logger.info(f"Gain: {gain_db} dB")
         
         # Initialize VAD
-        if vad_type == "silero" and SILERO_AVAILABLE:
-            self.vad = SileroVAD(sample_rate, vad_aggressiveness)
-        elif WEBRTC_AVAILABLE:
-            self.vad = WebRTCVAD(sample_rate, vad_aggressiveness)
-        else:
-            logger.warning("No VAD available! Audio will be captured without speech detection.")
+        try:
+            if vad_type == "silero":
+                if SILERO_AVAILABLE:
+                    self.vad = SileroVAD(sample_rate, vad_aggressiveness)
+                elif WEBRTC_AVAILABLE:
+                    logger.warning("Silero VAD requested but unavailable; falling back to WebRTC VAD")
+                    self.vad = WebRTCVAD(sample_rate, vad_aggressiveness)
+                else:
+                    logger.warning("Silero VAD requested but unavailable; falling back to EnergyVAD")
+                    self.vad = EnergyVAD(sample_rate, vad_aggressiveness)
+            elif vad_type == "energy":
+                self.vad = EnergyVAD(sample_rate, vad_aggressiveness)
+            elif vad_type == "webrtc":
+                if WEBRTC_AVAILABLE:
+                    self.vad = WebRTCVAD(sample_rate, vad_aggressiveness)
+                else:
+                    logger.warning("WebRTC VAD requested but unavailable; falling back to EnergyVAD")
+                    self.vad = EnergyVAD(sample_rate, vad_aggressiveness)
+            else:
+                # Auto: prefer WebRTC, else Energy.
+                if WEBRTC_AVAILABLE:
+                    self.vad = WebRTCVAD(sample_rate, vad_aggressiveness)
+                else:
+                    self.vad = EnergyVAD(sample_rate, vad_aggressiveness)
+        except Exception as e:
+            logger.warning(f"Failed to initialize requested VAD ({vad_type}): {e}; capturing without VAD")
             self.vad = None
         
         # State

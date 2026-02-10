@@ -12,7 +12,9 @@ import sys
 import os
 import logging
 import argparse
+import subprocess
 from pathlib import Path
+from typing import Optional
 
 # Add project to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -50,6 +52,12 @@ Examples:
   %(prog)s --list-models             # List available models
   %(prog)s --download tiny           # Download tiny model
         """
+    )
+
+    parser.add_argument(
+        '--terminal', '--tui',
+        action='store_true',
+        help='Run the headless terminal UI (curses) instead of the PyQt GUI'
     )
     
     parser.add_argument(
@@ -92,6 +100,23 @@ Examples:
     )
     
     return parser.parse_args()
+
+
+def _maybe_run_terminal(argv: list[str]) -> Optional[int]:
+    """If --terminal/--tui is present, run terminal_app.py and return its exit code."""
+    if '--terminal' not in argv and '--tui' not in argv:
+        return None
+
+    # Remove our helper flag(s) and exec the TUI entrypoint.
+    pass_args = [a for a in argv if a not in ('--terminal', '--tui')]
+    terminal_app = Path(__file__).parent / 'terminal_app.py'
+
+    if not terminal_app.exists():
+        print("Error: terminal_app.py not found")
+        return 1
+
+    cmd = [sys.executable, str(terminal_app)] + pass_args
+    return subprocess.call(cmd)
 
 
 def list_models():
@@ -214,6 +239,10 @@ def check_dependencies():
 
 def main():
     """Main application entry point."""
+    terminal_exit = _maybe_run_terminal(sys.argv[1:])
+    if terminal_exit is not None:
+        return int(terminal_exit)
+
     args = parse_arguments()
     
     # Set verbose logging

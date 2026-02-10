@@ -241,6 +241,28 @@ Models are stored in `models/` directory as GGML binary files (.bin). These are 
 
 ---
 
+## Headless Raspberry Pi (TUI)
+
+For Raspberry Pi / headless setups, use the curses terminal UI:
+
+```bash
+# Install headless deps
+./install_python_deps.sh --cli
+
+# Run TUI via main entrypoint helper flag
+python main.py --terminal --model base.en --threads 4
+
+# Download a fast English model
+python terminal_app.py --download base.en
+
+# Run TUI (starts recording immediately)
+python terminal_app.py --model base.en --threads 4
+```
+
+Controls: `q` quit, `r` start/stop recording, `c` clear screen.
+
+---
+
 ## 🔮 Future Enhancements
 
 - [ ] Export transcription to file
