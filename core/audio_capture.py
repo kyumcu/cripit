@@ -339,8 +339,87 @@ class AudioCapture:
         
         # Calculate gain multiplier
         self._gain_multiplier = 10 ** (gain_db / 20.0)
+        self._capture_sample_rate = sample_rate
         
         logger.info("AudioCapture initialized successfully")
+
+    @staticmethod
+    def _resample_int16(audio_data: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+        """Resample mono int16 audio using linear interpolation."""
+        if src_rate <= 0 or dst_rate <= 0:
+            return audio_data
+        if src_rate == dst_rate or audio_data.size == 0:
+            return audio_data
+
+        dst_len = int(round((audio_data.size * float(dst_rate)) / float(src_rate)))
+        if dst_len <= 0:
+            return np.array([], dtype=np.int16)
+
+        src_idx = np.arange(audio_data.size, dtype=np.float32)
+        dst_idx = np.linspace(0.0, float(audio_data.size - 1), num=dst_len, dtype=np.float32)
+        out = np.interp(dst_idx, src_idx, audio_data.astype(np.float32))
+        return out.clip(-32768, 32767).astype(np.int16)
+
+    def _resolve_sounddevice_input(self):
+        """Resolve usable sounddevice input device and capture sample rate."""
+        all_devices = sd.query_devices()
+        input_devices = [(i, d) for i, d in enumerate(all_devices) if d.get('max_input_channels', 0) > 0]
+        if not input_devices:
+            raise RuntimeError("No input devices available")
+
+        selected_index = None
+        selected_info = None
+
+        # Explicit device index wins when valid.
+        if self.device_index is not None and int(self.device_index) >= 0:
+            idx = int(self.device_index)
+            info = sd.query_devices(idx)
+            if info.get('max_input_channels', 0) <= 0:
+                raise RuntimeError(f"Selected device #{idx} is not an input device")
+            selected_index = idx
+            selected_info = info
+        else:
+            # Default input from host API.
+            try:
+                default_input = int(sd.default.device[0])
+            except Exception:
+                default_input = -1
+
+            if default_input >= 0:
+                try:
+                    info = sd.query_devices(default_input)
+                    if info.get('max_input_channels', 0) > 0:
+                        selected_index = default_input
+                        selected_info = info
+                except Exception:
+                    selected_index = None
+
+            # Fallback to first available input.
+            if selected_index is None:
+                selected_index, selected_info = input_devices[0]
+
+        target_rate = int(self.sample_rate)
+        capture_rate = target_rate
+        max_input_channels = int(selected_info.get('max_input_channels', 1) or 1)
+        channel_count = max(1, min(int(self.channels), max_input_channels))
+
+        try:
+            sd.check_input_settings(device=selected_index, channels=channel_count, samplerate=target_rate, dtype=np.int16)
+        except Exception as e:
+            dev_rate = int(selected_info.get('default_samplerate', 0) or 0)
+            if dev_rate <= 0:
+                raise RuntimeError(f"Requested sample rate {target_rate} not supported: {e}")
+
+            sd.check_input_settings(device=selected_index, channels=channel_count, samplerate=dev_rate, dtype=np.int16)
+            capture_rate = dev_rate
+            logger.warning(
+                "Requested sample rate %d Hz not supported by device #%d; using %d Hz and resampling",
+                target_rate,
+                selected_index,
+                capture_rate,
+            )
+
+        return selected_index, selected_info, channel_count, capture_rate
     
     def set_gain(self, gain_db: float):
         """Update gain setting (can be called while recording)."""
@@ -600,13 +679,16 @@ class AudioCapture:
         self._frame_buffer = np.array([], dtype=np.int16)
         self._vad_frame_size = int(self.sample_rate * 30 / 1000)  # 30ms frames
         
-        # Log device info if specified
-        if self.device_index is not None:
-            try:
-                device_info = sd.query_devices(self.device_index)
-                logger.info(f"Using device #{self.device_index}: {device_info['name']}")
-            except Exception as e:
-                logger.warning(f"Could not get device #{self.device_index} info: {e}")
+        selected_device, device_info, channel_count, capture_rate = self._resolve_sounddevice_input()
+        self._capture_sample_rate = int(capture_rate)
+        logger.info(
+            "Using device #%d: %s (capture_rate=%dHz, target_rate=%dHz, channels=%d)",
+            selected_device,
+            device_info.get('name', 'unknown'),
+            self._capture_sample_rate,
+            self.sample_rate,
+            channel_count,
+        )
         
         def audio_callback(indata, frames, time_info, status):
             """Callback for sounddevice."""
@@ -624,6 +706,9 @@ class AudioCapture:
                 else:
                     audio_data = audio_data.astype(np.int16)
             
+            if self._capture_sample_rate != self.sample_rate:
+                audio_data = self._resample_int16(audio_data, self._capture_sample_rate, self.sample_rate)
+
             # Apply gain if set
             if self._gain_multiplier != 1.0:
                 # Convert to float, apply gain, clip, convert back to int16
@@ -641,16 +726,14 @@ class AudioCapture:
         
         # Start input stream with device if specified
         stream_kwargs = {
-            'samplerate': self.sample_rate,
-            'channels': self.channels,
+            'samplerate': self._capture_sample_rate,
+            'channels': channel_count,
             'dtype': np.int16,
             'blocksize': self.chunk_size,
-            'callback': audio_callback
+            'callback': audio_callback,
+            'device': selected_device,
         }
-        
-        if self.device_index is not None:
-            stream_kwargs['device'] = self.device_index
-        
+
         self._stream = sd.InputStream(**stream_kwargs)
         
         self._stream.start()

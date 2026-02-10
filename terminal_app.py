@@ -87,6 +87,7 @@ class TerminalUI:
         pipeline,
         transcriber,
         model_name: str,
+        recording_device: str,
         output_file: Optional[Path],
         autostart: bool,
     ):
@@ -97,6 +98,7 @@ class TerminalUI:
         self.pipeline = pipeline
         self.transcriber = transcriber
         self.model_name = model_name
+        self.recording_device = recording_device
 
         self.output_file = output_file
         self.saving_enabled = bool(output_file)
@@ -262,9 +264,10 @@ class TerminalUI:
             f"Perf: last={self.last_segment_s:.1f}s rtf={self.last_rtf:.2f} avg={avg_rtf:.2f}"
         )
         self._safe_addstr(0, 0, header[: w - 1])
+        self._safe_addstr(1, 0, f"Mic: {self.recording_device}"[: w - 1])
 
         # Transcript area
-        top = 1
+        top = 2
         bottom = h - 2
         avail = max(0, bottom - top + 1)
         view = self.lines[-avail:] if avail > 0 else []
@@ -362,6 +365,33 @@ def _print_devices() -> int:
         sr = d.get("sample_rate")
         print(f"{mark} {idx:>3} | ch={ch} | sr={sr} | {name}")
     return 0
+
+
+def _describe_recording_device(audio_cls, *, device_index: Optional[int], channels: int, sample_rate: int) -> str:
+    try:
+        devices = audio_cls.list_devices()
+    except Exception:
+        devices = []
+
+    selected = None
+    if device_index is not None:
+        for d in devices:
+            if int(d.get("index", -9999)) == int(device_index):
+                selected = d
+                break
+        if selected is None:
+            return f"#{device_index} (unavailable) | ch={channels} | sr={sample_rate}"
+    else:
+        selected = next((d for d in devices if d.get("default")), None)
+        if selected is None and devices:
+            selected = devices[0]
+
+    if not selected:
+        return f"default | ch={channels} | sr={sample_rate}"
+
+    idx = selected.get("index")
+    name = str(selected.get("name", "unknown"))
+    return f"#{idx} | ch={channels} | sr={sample_rate} | {name}"
 
 
 def _print_models() -> int:
@@ -464,6 +494,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         device_index=args.device_index,
         gain_db=float(args.gain_db),
     )
+    recording_device = _describe_recording_device(
+        AudioCapture,
+        device_index=args.device_index,
+        channels=1,
+        sample_rate=16000,
+    )
 
     event_q: "queue.Queue[Event]" = queue.Queue()
 
@@ -525,6 +561,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             pipeline=pipeline,
             transcriber=transcriber,
             model_name=str(args.model),
+            recording_device=recording_device,
             output_file=out_file,
             autostart=(not bool(args.no_autostart)),
         )
