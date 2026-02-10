@@ -66,7 +66,9 @@ def create_transcriber(engine_type: Optional[str] = None) -> Optional[BaseTransc
                 compute_type=config.model.whisperx_compute_type,
                 language=config.model.language,
                 enable_diarization=config.model.whisperx_diarize,
-                hf_token=config.model.whisperx_hf_token
+                hf_token=config.model.whisperx_hf_token,
+                cpu_threads=getattr(config.model, "whisperx_cpu_threads", 0),
+                num_workers=getattr(config.model, "whisperx_num_workers", 1),
             )
             
             logger.info(f"Created WhisperX transcriber: {config.model.whisperx_model}")

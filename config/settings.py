@@ -81,6 +81,8 @@ class ModelSettings:
     whisperx_diarize: bool = False  # Disabled by default (opt-in)
     whisperx_hf_token: Optional[str] = None  # Required only if diarization enabled
     whisperx_device: str = "cuda"  # Options: "cuda", "cpu"
+    whisperx_cpu_threads: int = 0  # 0 = let backend decide
+    whisperx_num_workers: int = 1
     
     def __post_init__(self):
         logger.info(f"ModelSettings initialized with default model: {self.default_model}")
@@ -245,6 +247,8 @@ class AppConfig:
                     'whisperx_diarize': self.model.whisperx_diarize,
                     'whisperx_hf_token': self.model.whisperx_hf_token,
                     'whisperx_device': self.model.whisperx_device,
+                    'whisperx_cpu_threads': self.model.whisperx_cpu_threads,
+                    'whisperx_num_workers': self.model.whisperx_num_workers,
                 },
                 'ui': {
                     'auto_copy': self.ui.auto_copy,

@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 # Lazy import to avoid import errors if whisperx not installed
 WHISPERX_AVAILABLE = False
+whisperx = None  # type: ignore[assignment]
+torch = None  # type: ignore[assignment]
 try:
     import whisperx
     import torch
@@ -23,6 +25,33 @@ try:
     logger.info("WhisperX available")
 except ImportError as e:
     logger.warning(f"WhisperX not available: {e}")
+
+
+def _maybe_allowlist_torch_safe_globals_for_whisperx() -> bool:
+    """Best-effort allowlist for PyTorch 2.6+ weights_only loads.
+
+    Some WhisperX dependency checkpoints include OmegaConf objects.
+    In PyTorch 2.6, torch.load defaults weights_only=True and may reject
+    these types unless allowlisted.
+    """
+    try:
+        if not WHISPERX_AVAILABLE:
+            return False
+
+        ser = getattr(torch, "serialization", None)
+        add_safe = getattr(ser, "add_safe_globals", None)
+        if add_safe is None:
+            return False
+
+        # Only import if installed; these are safe types to allowlist.
+        from omegaconf.listconfig import ListConfig  # type: ignore
+        from omegaconf.dictconfig import DictConfig  # type: ignore
+        from omegaconf.base import ContainerMetadata  # type: ignore
+
+        add_safe([ListConfig, DictConfig, ContainerMetadata])
+        return True
+    except Exception:
+        return False
 
 
 class WhisperXTranscriber(BaseTranscriber):
@@ -36,8 +65,11 @@ class WhisperXTranscriber(BaseTranscriber):
                  device: str = "cuda",
                  compute_type: str = "int8",
                  language: Optional[str] = None,
+                 vad_method: str = "silero",
                  enable_diarization: bool = False,
-                 hf_token: Optional[str] = None):
+                 hf_token: Optional[str] = None,
+                 cpu_threads: int = 0,
+                 num_workers: int = 1):
         """
         Initialize WhisperX transcriber.
         
@@ -46,6 +78,7 @@ class WhisperXTranscriber(BaseTranscriber):
             device: Device to use ("cuda" or "cpu")
             compute_type: Compute precision ("int8", "float16", "float32")
             language: Language code (e.g., 'en') or None for auto-detect
+            vad_method: VAD method for WhisperX ("silero" or "pyannote")
             enable_diarization: Whether to enable speaker diarization
             hf_token: HuggingFace token (required for diarization)
         """
@@ -53,14 +86,20 @@ class WhisperXTranscriber(BaseTranscriber):
         self.device = device
         self.compute_type = compute_type
         self.language = language
+        self.vad_method = vad_method
         self.enable_diarization = enable_diarization
         self.hf_token = hf_token
+        self.cpu_threads = int(cpu_threads) if cpu_threads is not None else 0
+        self.num_workers = int(num_workers) if num_workers is not None else 1
         
         # Model instances
         self._model = None
         self._align_model = None
         self._diarize_model = None
         self._model_loaded = False
+
+        # Last error (best-effort, for UI / CLI troubleshooting)
+        self.last_error: Optional[str] = None
         
         # Threading lock
         self._transcription_lock = threading.Lock()
@@ -70,8 +109,15 @@ class WhisperXTranscriber(BaseTranscriber):
         self._total_audio_seconds = 0.0
         self._total_processing_seconds = 0.0
         
-        logger.info(f"WhisperXTranscriber initialized: {model_name} on {device}")
-    
+        logger.info(
+            "WhisperXTranscriber initialized: %s on %s (vad=%s cpu_threads=%s workers=%s)",
+            model_name,
+            device,
+            vad_method,
+            self.cpu_threads,
+            self.num_workers,
+        )
+
     def load_model(self) -> bool:
         """Load WhisperX model."""
         if not WHISPERX_AVAILABLE:
@@ -83,15 +129,81 @@ class WhisperXTranscriber(BaseTranscriber):
             return True
         
         try:
-            logger.info(f"Loading WhisperX model: {self.model_name}")
-            
-            # Load main model
-            self._model = whisperx.load_model(
-                self.model_name,
-                self.device,
-                compute_type=self.compute_type,
-                language=self.language
-            )
+            self.last_error = None
+
+            # Helpful debug context for failures.
+            try:
+                torch_version = getattr(torch, "__version__", "unknown") if torch else "missing"
+                logger.info(
+                    "WhisperX load_model: model=%s device=%s compute=%s language=%s vad=%s torch=%s",
+                    self.model_name,
+                    self.device,
+                    self.compute_type,
+                    (self.language or "auto"),
+                    self.vad_method,
+                    torch_version,
+                )
+            except Exception:
+                pass
+
+            # Preemptively apply a safe-globals allowlist when available.
+            if _maybe_allowlist_torch_safe_globals_for_whisperx():
+                logger.info("Applied PyTorch safe-globals allowlist for OmegaConf")
+
+            def _load_with_vad(vad_method: str):
+                # NOTE: whisperx.asr.load_model accepts `threads` (not cpu_threads/num_workers)
+                # in the WhisperX version we vendor/use.
+                threads = int(self.cpu_threads) if int(self.cpu_threads) > 0 else None
+                kwargs = {
+                    "compute_type": self.compute_type,
+                    "language": self.language,
+                    "vad_method": vad_method,
+                }
+                if threads is not None:
+                    kwargs["threads"] = threads
+
+                return whisperx.load_model(
+                    self.model_name,
+                    self.device,
+                    **kwargs,
+                )
+
+            # Load main model (with VAD)
+            try:
+                self._model = _load_with_vad(self.vad_method)
+            except Exception as e:
+                msg = str(e)
+                self.last_error = msg
+
+                # Common failure mode on PyTorch 2.6+: weights_only safety blocks
+                # deserializing some objects in dependency checkpoints (often VAD).
+                if "Weights only load failed" in msg:
+                    # Retry once after applying safe-globals allowlist (OmegaConf, etc.).
+                    if _maybe_allowlist_torch_safe_globals_for_whisperx():
+                        logger.warning(
+                            "WhisperX model load failed due to PyTorch weights_only safety; retrying after allowlisting"
+                        )
+                        try:
+                            self._model = _load_with_vad(self.vad_method)
+                            msg = ""
+                            self.last_error = None
+                        except Exception as e2:
+                            msg = str(e2)
+                            self.last_error = msg
+
+                    # If still failing and we're using pyannote, fall back to silero VAD.
+                    if self.vad_method == "pyannote" and "Weights only load failed" in msg:
+                        logger.warning(
+                            "WhisperX load_model still failing with pyannote VAD; retrying with silero VAD"
+                        )
+                        self._model = _load_with_vad("silero")
+                        self.vad_method = "silero"
+                        self.last_error = None
+
+                    if self._model is None:
+                        raise
+                else:
+                    raise
             
             # Load alignment model for word-level timestamps
             if self.language:
@@ -113,11 +225,13 @@ class WhisperXTranscriber(BaseTranscriber):
                     )
             
             self._model_loaded = True
+            self.last_error = None
             logger.info("✓ WhisperX model loaded successfully")
             return True
             
         except Exception as e:
-            logger.error(f"Failed to load WhisperX model: {e}")
+            self.last_error = str(e)
+            logger.exception("Failed to load WhisperX model")
             return False
     
     def unload_model(self) -> None:
@@ -208,7 +322,31 @@ class WhisperXTranscriber(BaseTranscriber):
                     logger.error(f"Diarization failed: {e}")
             
             # Build text
-            text = " ".join([seg.get("text", "") for seg in result.get("segments", [])]).strip()
+            # WhisperX typically returns a top-level "text" plus per-segment "text".
+            # In practice we've seen cases where segment text is empty/None while
+            # the top-level text is populated (or vice-versa), so prefer the
+            # top-level field and fall back to segments.
+            text = ""
+            try:
+                raw_text = result.get("text") if isinstance(result, dict) else None
+                if isinstance(raw_text, str):
+                    text = raw_text.strip()
+            except Exception:
+                text = ""
+
+            if not text:
+                seg_texts = []
+                for seg in (result.get("segments", []) if isinstance(result, dict) else []):
+                    try:
+                        t = seg.get("text", "")
+                        if t is None:
+                            continue
+                        t = str(t).strip()
+                        if t:
+                            seg_texts.append(t)
+                    except Exception:
+                        continue
+                text = " ".join(seg_texts).strip()
             
             processing_time = time.time() - start_time
             rtf = processing_time / duration if duration > 0 else 0
@@ -281,6 +419,8 @@ def create_whisperx_transcriber(config=None, **kwargs) -> WhisperXTranscriber:
             language=config.model.language,
             enable_diarization=config.model.whisperx_diarize,
             hf_token=config.model.whisperx_hf_token,
+            cpu_threads=getattr(config.model, "whisperx_cpu_threads", 0),
+            num_workers=getattr(config.model, "whisperx_num_workers", 1),
         )
     else:
         return WhisperXTranscriber(**kwargs)

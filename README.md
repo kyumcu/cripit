@@ -252,11 +252,22 @@ For Raspberry Pi / headless setups, use the curses terminal UI:
 # Run TUI via main entrypoint helper flag
 python main.py --terminal --model base.en --threads 4
 
+# Engine selection
+# - whispercpp: uses local GGML .bin models in models/
+# - whisperx: downloads models automatically from Hugging Face on first run
+python terminal_app.py --check-engines
+
 # Download a fast English model
 python terminal_app.py --download base.en
 
 # Run TUI (starts recording immediately)
 python terminal_app.py --model base.en --threads 4
+
+# WhisperX example (no manual download step)
+python terminal_app.py --engine whisperx --whisperx-model tiny
+
+# Optional: pre-download WhisperX model into HF cache
+python terminal_app.py --download-whisperx tiny
 ```
 
 Controls: `q` quit, `r` start/stop recording, `c` clear screen.

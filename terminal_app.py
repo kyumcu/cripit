@@ -8,8 +8,10 @@ It reuses the existing durable spool + sequential transcription pipeline.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import curses
 import logging
+import os
 import queue
 import sys
 import time
@@ -76,6 +78,126 @@ def _wrap_lines(text: str, width: int) -> List[str]:
     return out
 
 
+def _configure_third_party_console_noise() -> None:
+    """Reduce third-party stdout/stderr noise that can corrupt curses output."""
+    # Hugging Face / transformers can emit progress bars and warnings to stderr.
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+
+def _silence_noisy_loggers() -> None:
+    """Best-effort: force common third-party loggers to stay off the terminal."""
+    try:
+        import logging as _logging
+
+        prefixes = (
+            "whisperx",
+            "faster_whisper",
+            "transformers",
+            "huggingface_hub",
+            "pyannote",
+            "speechbrain",
+            "torchaudio",
+            "numba",
+        )
+
+        for name in list(getattr(_logging.root.manager, "loggerDict", {}).keys()):
+            if not isinstance(name, str):
+                continue
+            if not name.startswith(prefixes):
+                continue
+            lg = _logging.getLogger(name)
+            lg.setLevel(_logging.ERROR)
+            # If a library installed its own StreamHandler, drop it so logs go
+            # to our root handlers (file) only.
+            lg.handlers = []
+            lg.propagate = True
+    except Exception:
+        pass
+
+
+@contextlib.contextmanager
+def _redirect_stdout_to_file(path: Path):
+    """Temporarily redirect Python-level stdout to a file."""
+    f = None
+    old_out = sys.stdout
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        f = open(path, "a", encoding="utf-8")
+        sys.stdout = f  # type: ignore[assignment]
+        yield
+    finally:
+        try:
+            if f:
+                f.flush()
+        except Exception:
+            pass
+        sys.stdout = old_out
+        try:
+            if f:
+                f.close()
+        except Exception:
+            pass
+
+
+@contextlib.contextmanager
+def _redirect_stderr_to_file(path: Path):
+    """Temporarily redirect Python-level stderr to a file."""
+    f = None
+    old_err = sys.stderr
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        f = open(path, "a", encoding="utf-8")
+        sys.stderr = f  # type: ignore[assignment]
+        yield
+    finally:
+        try:
+            if f:
+                f.flush()
+        except Exception:
+            pass
+        sys.stderr = old_err
+        try:
+            if f:
+                f.close()
+        except Exception:
+            pass
+
+
+@contextlib.contextmanager
+def _redirect_stderr_fd_to_file(path: Path):
+    """Redirect OS-level stderr (fd 2) to a file.
+
+    IMPORTANT: Do not redirect stdout (fd 1) while curses runs, or curses may
+    fail to initialize (cbreak()/nocbreak() ERR) because stdout is no longer a TTY.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    f = None
+    old2 = None
+    try:
+        f = open(path, "a", encoding="utf-8")
+        old2 = os.dup(2)
+        os.dup2(f.fileno(), 2)
+        yield
+    finally:
+        try:
+            if old2 is not None:
+                os.dup2(old2, 2)
+        except Exception:
+            pass
+        try:
+            if old2 is not None:
+                os.close(old2)
+        except Exception:
+            pass
+        try:
+            if f:
+                f.close()
+        except Exception:
+            pass
+
+
 class TerminalUI:
     def __init__(
         self,
@@ -124,17 +246,37 @@ class TerminalUI:
             self._toggle_recording(force_on=True)
 
     def _init_curses(self) -> None:
-        curses.curs_set(0)
+        # Some terminals (or TERM settings) don't support cursor visibility
+        # changes; avoid crashing on startup.
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        except Exception:
+            pass
+
         self.stdscr.nodelay(True)
         self.stdscr.keypad(True)
         curses.noecho()
         curses.cbreak()
 
+        # Make escape sequences feel less "laggy" (best-effort).
+        try:
+            curses.set_escdelay(25)
+        except Exception:
+            pass
+
     def _safe_addstr(self, y: int, x: int, s: str, attr: int = 0) -> None:
         try:
             self.stdscr.addnstr(y, x, s, max(0, self.stdscr.getmaxyx()[1] - x - 1), attr)
         except curses.error:
-            pass
+            # Some terminals can throw on wide/unprintable chars; try a
+            # conservative ASCII fallback so the UI still renders.
+            try:
+                safe = s.encode("ascii", "replace").decode("ascii")
+                self.stdscr.addnstr(y, x, safe, max(0, self.stdscr.getmaxyx()[1] - x - 1), attr)
+            except Exception:
+                pass
 
     def _append_text(self, text: str) -> None:
         if not text:
@@ -296,6 +438,8 @@ class TerminalUI:
         footer = "q quit | r toggle rec | c clear"
         if self.output_file:
             footer += f" | s save={'on' if self.saving_enabled else 'off'} ({self.output_file})"
+        if self.last_error:
+            footer += f" | err: {self.last_error}"
         self._safe_addstr(h - 1, 0, footer[: w - 1])
 
         self.stdscr.refresh()
@@ -322,6 +466,9 @@ class TerminalUI:
             if ch != -1:
                 if ch in (ord("q"), ord("Q")):
                     self.running = False
+                elif ch == curses.KEY_RESIZE:
+                    # Next render will redraw to the new size.
+                    pass
                 elif ch in (ord("r"), ord("R")):
                     self._toggle_recording()
                 elif ch in (ord("c"), ord("C")):
@@ -329,8 +476,12 @@ class TerminalUI:
                 elif ch in (ord("s"), ord("S")) and self.output_file:
                     self.saving_enabled = not self.saving_enabled
 
-            self._render()
-            time.sleep(0.05)
+            try:
+                self._render()
+            except Exception as e:
+                # Avoid leaving the terminal in a broken state due to render errors.
+                self.last_error = f"render failed: {type(e).__name__}: {e}"
+                time.sleep(0.1)
 
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
@@ -339,10 +490,16 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
+            "  # Choose engine:\n"
+            "  # - whispercpp: uses local GGML .bin models in models/\n"
+            "  # - whisperx: auto-downloads models from Hugging Face on first use\n"
+            "  #   (or pre-download with --download-whisperx)\n\n"
             "  # Basic usage with whisper.cpp (default)\n"
-            "  python terminal_app.py --model base.en --threads 4\n\n"
+            "  python terminal_app.py --engine whispercpp --model base.en --threads 4\n\n"
             "  # Use WhisperX for faster transcription\n"
-            "  python terminal_app.py --engine whisperx --whisperx-model base\n\n"
+            "  python terminal_app.py --engine whisperx --language en --whisperx-model base\n\n"
+            "  # WhisperX on multicore CPU\n"
+            "  python terminal_app.py --engine whisperx --language en --whisperx-device cpu --whisperx-model tiny --whisperx-compute-type int8 --whisperx-cpu-threads 4\n\n"
             "  # WhisperX with speaker diarization\n"
             "  python terminal_app.py --engine whisperx --whisperx-diarize --whisperx-hf-token <token>\n\n"
             "  # Start idle (press 'r' to record)\n"
@@ -351,14 +508,24 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
             "  python terminal_app.py --list-devices\n\n"
             "  # List models for specific engine\n"
             "  python terminal_app.py --list-models --engine whisperx\n\n"
-            "  # Download whisper.cpp model\n"
-            "  python terminal_app.py --download base.en\n"
+            "  # Download whisper.cpp model (only used by whispercpp)\n"
+            "  python terminal_app.py --download tiny\n"
+            "\n"
+            "  # Pre-download WhisperX model into Hugging Face cache\n"
+            "  python terminal_app.py --download-whisperx tiny\n"
         ),
     )
     
     # ASR Engine selection
-    p.add_argument("--engine", choices=["whispercpp", "whisperx"], default=None,
-                   help="ASR engine to use (default: from config, usually whispercpp)")
+    p.add_argument(
+        "--engine",
+        choices=["whispercpp", "whisperx"],
+        default=None,
+        help=(
+            "ASR engine to use (default: from config). "
+            "whispercpp uses local .bin models in models/; whisperx auto-downloads from Hugging Face."
+        ),
+    )
     
     # whisper.cpp options
     p.add_argument("--model", default=None, help="Whisper.cpp model name (default: from config)")
@@ -374,6 +541,18 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     p.add_argument("--whisperx-device", default=None,
                    choices=["cuda", "cpu"],
                    help="WhisperX device (default: from config)")
+    p.add_argument(
+        "--whisperx-cpu-threads",
+        type=int,
+        default=None,
+        help="WhisperX CPU threads (0=auto; default: from config)",
+    )
+    p.add_argument(
+        "--whisperx-num-workers",
+        type=int,
+        default=None,
+        help="WhisperX worker processes/threads (default: from config)",
+    )
     p.add_argument("--whisperx-diarize", action="store_true",
                    help="Enable speaker diarization (requires --whisperx-hf-token)")
     p.add_argument("--whisperx-hf-token", default=None,
@@ -389,7 +568,20 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     p.add_argument("--no-autostart", action="store_true", help="Start idle; press r to record")
     p.add_argument("--list-devices", action="store_true", help="List audio input devices and exit")
     p.add_argument("--list-models", action="store_true", help="List available models and exit")
-    p.add_argument("--download", metavar="MODEL", help="Download a whisper.cpp model and exit")
+    p.add_argument(
+        "--download",
+        metavar="MODEL",
+        help="Download a whisper.cpp model into models/ and exit (whispercpp only)",
+    )
+    p.add_argument(
+        "--download-whisperx",
+        metavar="SIZE",
+        choices=["tiny", "base", "small", "medium", "large-v3"],
+        help=(
+            "Pre-download WhisperX model into Hugging Face cache and exit "
+            "(requires huggingface_hub; models still load via --engine whisperx)"
+        ),
+    )
     p.add_argument("--check-engines", action="store_true", help="Check which ASR engines are available and exit")
     p.add_argument("--verbose", action="store_true", help="Verbose logging to output/terminal.log")
     return p.parse_args(argv)
@@ -478,7 +670,8 @@ def _print_models(engine: Optional[str] = None) -> int:
     
     if engine == "whisperx":
         # WhisperX models (auto-downloaded from HF)
-        print("Note: WhisperX models are downloaded automatically from HuggingFace\n")
+        print("Note: WhisperX models are downloaded automatically from Hugging Face on first use")
+        print("      (or pre-download with: python terminal_app.py --download-whisperx tiny)\n")
         whisperx_models = {
             "tiny": "39M parameters, ~150MB",
             "base": "74M parameters, ~290MB", 
@@ -491,7 +684,7 @@ def _print_models(engine: Optional[str] = None) -> int:
     else:
         # whisper.cpp models (need manual download)
         avail = set(mm.get_available_models())
-        print("Note: Use --download <model> to download whisper.cpp models\n")
+        print("Note: Use --download <model> to download whisper.cpp models into models/\n")
         for name in mm.list_models():
             status = "✓ downloaded" if name in avail else "  not downloaded"
             info = mm.get_model_info(name)
@@ -532,8 +725,36 @@ def _download_model(model: str) -> int:
     return 0 if ok else 1
 
 
+def _download_whisperx_model(size: str) -> int:
+    """Pre-download WhisperX model weights into Hugging Face cache."""
+    # Map CLI sizes to HF repos.
+    repo_id = f"openai/whisper-{size}" if size != "large-v3" else "openai/whisper-large-v3"
+
+    try:
+        from huggingface_hub import snapshot_download  # type: ignore
+    except Exception:
+        print("ERROR: huggingface_hub is not installed")
+        print("Install with: pip install -U huggingface_hub")
+        return 1
+
+    print(f"Pre-downloading WhisperX model '{size}' into Hugging Face cache")
+    print(f"Repo: {repo_id}")
+
+    try:
+        # Download into default HF cache (no local_dir) so WhisperX can pick it up.
+        snapshot_download(repo_id=repo_id)
+    except Exception as e:
+        print(f"failed: {type(e).__name__}: {e}")
+        return 1
+
+    print("ok")
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(list(argv) if argv is not None else sys.argv[1:])
+
+    _configure_third_party_console_noise()
 
     # Non-curses actions
     if args.list_devices:
@@ -544,6 +765,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return _print_models(args.engine)
     if args.download:
         return _download_model(args.download)
+    if getattr(args, "download_whisperx", None):
+        return _download_whisperx_model(args.download_whisperx)
 
     _configure_logging(verbose=bool(args.verbose))
     log = logging.getLogger("terminal_app")
@@ -588,6 +811,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             config.model.whisperx_compute_type = args.whisperx_compute_type
         if args.whisperx_device:
             config.model.whisperx_device = args.whisperx_device
+        if getattr(args, "whisperx_cpu_threads", None) is not None:
+            config.model.whisperx_cpu_threads = int(args.whisperx_cpu_threads)
+        if getattr(args, "whisperx_num_workers", None) is not None:
+            config.model.whisperx_num_workers = int(args.whisperx_num_workers)
         if args.whisperx_diarize:
             config.model.whisperx_diarize = True
         if args.whisperx_hf_token:
@@ -596,6 +823,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         whisperx_options = {
             'compute_type': config.model.whisperx_compute_type,
             'diarize': config.model.whisperx_diarize,
+            'cpu_threads': getattr(config.model, 'whisperx_cpu_threads', 0),
+            'num_workers': getattr(config.model, 'whisperx_num_workers', 1),
         }
         
         # Determine model name to display
@@ -726,7 +955,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         ui.loop()
 
     try:
-        curses.wrapper(_curses_main)
+        # Redirect stderr during curses so that libraries like WhisperX/tqdm
+        # don't corrupt the screen with progress bars/warnings.
+        ext_log = Path("output") / "terminal_external.log"
+        _silence_noisy_loggers()
+        with (
+            _redirect_stderr_fd_to_file(ext_log),
+            _redirect_stdout_to_file(ext_log),
+            _redirect_stderr_to_file(ext_log),
+        ):
+            curses.wrapper(_curses_main)
     except KeyboardInterrupt:
         pass
     finally:
