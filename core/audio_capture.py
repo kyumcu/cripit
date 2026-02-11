@@ -250,7 +250,7 @@ class AudioCapture:
                  chunk_size: int = 1024,
                  vad_type: str = "webrtc",
                  vad_aggressiveness: int = 2,
-                 silence_timeout: float = 1.5,
+                 silence_timeout: float = 0.5,
                  max_recording_duration: float = 30.0,
                  device_index: Optional[int] = None,
                  gain_db: float = 0.0):

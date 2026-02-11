@@ -413,7 +413,7 @@ class MainWindow(QMainWindow):
         # ---- AudioCapture ----
         try:
             # These are safe to update at runtime (used by the capture loop).
-            self.audio_capture.silence_timeout = float(getattr(self.config.audio, "silence_timeout", 1.5))
+            self.audio_capture.silence_timeout = float(getattr(self.config.audio, "silence_timeout", 0.5))
             self.audio_capture.max_recording_duration = float(getattr(self.config.audio, "max_recording_duration", 30.0))
 
             # Gain can be changed live.

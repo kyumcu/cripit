@@ -561,6 +561,12 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     # Common options
     p.add_argument("--language", default=None, help="Language code (e.g., 'en'; default: from config)")
     p.add_argument("--vad", choices=["webrtc", "energy", "silero"], default="webrtc", help="VAD type")
+    p.add_argument(
+        "--silence-timeout",
+        type=float,
+        default=None,
+        help="Seconds of silence before cutting a segment (default: from config)",
+    )
     p.add_argument("--device-index", type=int, default=None, help="Audio input device index")
     p.add_argument("--gain-db", type=float, default=0.0, help="Input gain in dB")
     p.add_argument("--spool-dir", default=str(Path("output") / "spool"), help="Spool directory")
@@ -802,6 +808,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         config.model.language = args.language
     if args.threads:
         config.model.n_threads = args.threads
+    if getattr(args, "silence_timeout", None) is not None:
+        config.audio.silence_timeout = float(args.silence_timeout)
     
     # Update WhisperX-specific config
     if engine == "whisperx":
@@ -874,7 +882,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         channels=1,
         vad_type=str(args.vad),
         vad_aggressiveness=2,
-        silence_timeout=1.5,
+        silence_timeout=float(getattr(config.audio, "silence_timeout", 0.5)),
         max_recording_duration=30.0,
         device_index=args.device_index,
         gain_db=float(args.gain_db),

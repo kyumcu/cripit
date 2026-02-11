@@ -81,7 +81,7 @@ def test_audio_capture_initialization():
             chunk_size=1024,
             vad_type="webrtc",
             vad_aggressiveness=2,
-            silence_timeout=1.5
+            silence_timeout=0.5
         )
         
         print(f"✓ AudioCapture initialized")

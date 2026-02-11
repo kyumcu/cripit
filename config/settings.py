@@ -35,7 +35,7 @@ class AudioSettings:
     vad_enabled: bool = True
     vad_aggressiveness: int = 2  # 0-3, higher = more aggressive
     vad_frame_duration: int = 30  # ms (10, 20, or 30)
-    silence_timeout: float = 1.5  # Seconds of silence to end recording
+    silence_timeout: float = 0.5  # Seconds of silence to end recording
     
     # Device and gain settings
     device_index: Optional[int] = None  # None = default device
